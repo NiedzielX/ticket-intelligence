@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+from pathlib import Path
 from urllib import request, error
 from urllib.parse import urlparse
 
@@ -18,12 +19,19 @@ SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
 ROBOTICKET_USERNAME = os.environ["ROBOTICKET_USERNAME"]
 ROBOTICKET_PASSWORD = os.environ["ROBOTICKET_PASSWORD"]
 
+ART = Path("artifacts")
+ART.mkdir(exist_ok=True)
+
 CAPTURE = (
     "GetWGLSeats?",
     "GetWGLSeatsOccInfo?",
     "GetWGLSeatsMyInfo?",
 )
 
+
+# ------------------------------------------------------------
+# Supabase
+# ------------------------------------------------------------
 
 def api(path, method="GET", body=None, prefer=None):
     data = None if body is None else json.dumps(body).encode("utf-8")
@@ -48,9 +56,16 @@ def api(path, method="GET", body=None, prefer=None):
         with request.urlopen(req, timeout=30) as response:
             raw = response.read().decode("utf-8")
             return json.loads(raw) if raw else None
+
     except error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Supabase {exc.code}: {detail}") from exc
+        detail = exc.read().decode(
+            "utf-8",
+            errors="replace",
+        )
+
+        raise RuntimeError(
+            f"Supabase {exc.code}: {detail}"
+        ) from exc
 
 
 def create_snapshot():
@@ -71,7 +86,10 @@ def insert_occ(snapshot_id, items):
     rows = []
 
     for seat in items:
-        if not isinstance(seat, dict) or "id" not in seat:
+        if not isinstance(seat, dict):
+            continue
+
+        if "id" not in seat:
             continue
 
         rows.append(
@@ -108,10 +126,18 @@ def insert_my(snapshot_id, items):
     ]
 
     if rows:
-        api("my_seats", "POST", rows)
+        api(
+            "my_seats",
+            "POST",
+            rows,
+        )
 
     return len(rows)
 
+
+# ------------------------------------------------------------
+# Main
+# ------------------------------------------------------------
 
 async def main():
 
@@ -143,12 +169,39 @@ async def main():
 
         page = await context.new_page()
 
-        async def handle(response):
+        # --------------------------------------------------------
+        # General browser diagnostics
+        # --------------------------------------------------------
+
+        console_lines = []
+
+        page.on(
+            "console",
+            lambda message: console_lines.append(
+                f"{message.type}: {message.text}"
+            ),
+        )
+
+        page.on(
+            "pageerror",
+            lambda exc: console_lines.append(
+                f"PAGEERROR: {exc}"
+            ),
+        )
+
+        # --------------------------------------------------------
+        # Capture Roboticket inventory API
+        # --------------------------------------------------------
+
+        async def handle_inventory_response(response):
             nonlocal snapshot_id
 
             url = response.url
 
-            if not any(marker in url for marker in CAPTURE):
+            if not any(
+                marker in url
+                for marker in CAPTURE
+            ):
                 return
 
             try:
@@ -156,19 +209,28 @@ async def main():
             except Exception:
                 return
 
-            endpoint = urlparse(url).path.rsplit("/", 1)[-1]
+            endpoint = (
+                urlparse(url)
+                .path
+                .rsplit("/", 1)[-1]
+            )
 
-            print(f"Captured {response.status}: {endpoint}")
+            print(
+                f"Captured {response.status}: {endpoint}"
+            )
 
-            # Create snapshot only after Roboticket data actually starts flowing
             if snapshot_id is None:
                 snapshot_id = create_snapshot()
+
                 print(
                     f"Created Supabase snapshot "
                     f"{snapshot_id} for event {EVENT_ID}"
                 )
 
-            if endpoint == "GetWGLSeatsOccInfo" and isinstance(data, list):
+            if (
+                endpoint == "GetWGLSeatsOccInfo"
+                and isinstance(data, list)
+            ):
                 count = insert_occ(
                     snapshot_id,
                     data,
@@ -180,7 +242,10 @@ async def main():
                     f"Occupancy records: {len(data)}"
                 )
 
-            elif endpoint == "GetWGLSeatsMyInfo" and isinstance(data, list):
+            elif (
+                endpoint == "GetWGLSeatsMyInfo"
+                and isinstance(data, list)
+            ):
                 count = insert_my(
                     snapshot_id,
                     data,
@@ -192,14 +257,78 @@ async def main():
                     f"My session seats: {len(data)}"
                 )
 
-        page.on("response", handle)
+        page.on(
+            "response",
+            handle_inventory_response,
+        )
 
-        # -----------------------------------------------------------
-        # 1. Open protected event directly
-        # -----------------------------------------------------------
+        # --------------------------------------------------------
+        # Diagnostic listener for auth endpoint
+        # --------------------------------------------------------
 
-        print("Opening protected event:")
-        print(EVENT_URL)
+        async def log_auth_response(response):
+
+            if "konto.legia.com/login" not in response.url:
+                return
+
+            print("")
+            print("====================================")
+            print("AUTH RESPONSE")
+            print("====================================")
+
+            print(
+                "Status:",
+                response.status,
+            )
+
+            print(
+                "URL:",
+                response.url,
+            )
+
+            try:
+                body = await response.text()
+
+                print(
+                    "Response preview:"
+                )
+
+                print(
+                    body[:3000]
+                )
+
+                (ART / "auth-response.txt").write_text(
+                    body,
+                    encoding="utf-8",
+                )
+
+            except Exception as exc:
+                print(
+                    "Cannot read auth response:",
+                    exc,
+                )
+
+            print(
+                "===================================="
+            )
+            print("")
+
+        page.on(
+            "response",
+            log_auth_response,
+        )
+
+        # --------------------------------------------------------
+        # 1. Open protected event
+        # --------------------------------------------------------
+
+        print(
+            "Opening protected event:"
+        )
+
+        print(
+            EVENT_URL
+        )
 
         response = await page.goto(
             EVENT_URL,
@@ -209,7 +338,9 @@ async def main():
 
         print(
             "Initial status:",
-            response.status if response else "none",
+            response.status
+            if response
+            else "none",
         )
 
         print(
@@ -217,15 +348,19 @@ async def main():
             page.url,
         )
 
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(
+            2000
+        )
 
-        # -----------------------------------------------------------
-        # 2. If redirected to konto.legia.com, authenticate
-        # -----------------------------------------------------------
+        # --------------------------------------------------------
+        # 2. Authentication
+        # --------------------------------------------------------
 
         if "konto.legia.com" in page.url:
 
-            print("Authentication page detected.")
+            print(
+                "Authentication page detected."
+            )
 
             email = page.locator(
                 'input[formcontrolname="email"]:visible, '
@@ -247,7 +382,9 @@ async def main():
                 timeout=30000,
             )
 
-            print("Filling credentials...")
+            print(
+                "Filling credentials..."
+            )
 
             await email.fill(
                 ROBOTICKET_USERNAME
@@ -295,15 +432,80 @@ async def main():
             )
 
             print(
-                "Login form valid. "
-                "Submitting..."
+                "Login form valid. Submitting..."
             )
+
+            # ----------------------------------------------------
+            # Submit auth
+            # ----------------------------------------------------
 
             await submit.click()
 
-            # -------------------------------------------------------
-            # 3. Let Legia SSO perform its own redirect chain
-            # -------------------------------------------------------
+            await page.wait_for_timeout(
+                5000
+            )
+
+            print("")
+            print(
+                "URL after submit:",
+                page.url,
+            )
+
+            # ----------------------------------------------------
+            # Dump page text after login attempt
+            # ----------------------------------------------------
+
+            body_text = await page.locator(
+                "body"
+            ).inner_text()
+
+            print("")
+            print(
+                "===================================="
+            )
+
+            print(
+                "PAGE TEXT AFTER LOGIN:"
+            )
+
+            print(
+                "===================================="
+            )
+
+            print(
+                body_text[:5000]
+            )
+
+            print(
+                "===================================="
+            )
+
+            print("")
+
+            # ----------------------------------------------------
+            # Save post-login diagnostics
+            # ----------------------------------------------------
+
+            await page.screenshot(
+                path=str(
+                    ART / "after-login.png"
+                ),
+                full_page=True,
+            )
+
+            (ART / "after-login.html").write_text(
+                await page.content(),
+                encoding="utf-8",
+            )
+
+            (ART / "after-login-text.txt").write_text(
+                body_text,
+                encoding="utf-8",
+            )
+
+            # ----------------------------------------------------
+            # Wait for normal SSO redirect
+            # ----------------------------------------------------
 
             print(
                 "Waiting for SSO redirect "
@@ -316,6 +518,7 @@ async def main():
                         "bilety.legia.com" in url,
                     timeout=30000,
                 )
+
             except Exception:
                 print(
                     "No automatic redirect "
@@ -327,9 +530,9 @@ async def main():
                 page.url,
             )
 
-        # -----------------------------------------------------------
-        # 4. Ensure exact event page
-        # -----------------------------------------------------------
+        # --------------------------------------------------------
+        # 3. Ensure exact event page
+        # --------------------------------------------------------
 
         if (
             "bilety.legia.com" not in page.url
@@ -352,11 +555,43 @@ async def main():
             page.url,
         )
 
-        # Roboticket loads map data asynchronously
-        await page.wait_for_timeout(30000)
+        # --------------------------------------------------------
+        # 4. Wait for Roboticket XHR
+        # --------------------------------------------------------
 
+        await page.wait_for_timeout(
+            30000
+        )
+
+        # --------------------------------------------------------
+        # Final diagnostics
+        # --------------------------------------------------------
+
+        try:
+            await page.screenshot(
+                path=str(
+                    ART / "final-page.png"
+                ),
+                full_page=True,
+            )
+        except Exception:
+            pass
+
+        try:
+            (ART / "final-page.html").write_text(
+                await page.content(),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+        (ART / "console.txt").write_text(
+            "\n".join(console_lines),
+            encoding="utf-8",
+        )
+
+        print("")
         print("DONE")
-
         print(
             json.dumps(
                 counts,
@@ -366,10 +601,15 @@ async def main():
 
         await browser.close()
 
+    # ------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------
+
     if counts["occ"] == 0:
         raise RuntimeError(
             "Authentication finished but no occupancy "
-            "data was captured."
+            "data was captured. "
+            "Check AUTH RESPONSE and PAGE TEXT AFTER LOGIN."
         )
 
 
