@@ -1,0 +1,18 @@
+{
+  "event_id": 8009,
+  "observed": {
+    "seat_definition_count": 31213,
+    "occ_response2_count": 1734,
+    "occ_response3_count": 1065,
+    "my_info_before": [
+      354647,
+      354685,
+      354727
+    ],
+    "my_info_after_removing_one": [
+      354685,
+      354727
+    ]
+  },
+  "note": "occ values intentionally not mapped to available/occupied yet."
+}
