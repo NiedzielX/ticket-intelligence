@@ -1,355 +1,189 @@
 #!/usr/bin/env python3
-"""
-Legia / Roboticket inventory collector v0.1
-
-Purpose:
-- Open the public Roboticket stadium page in a real browser.
-- Intercept selected WGL XHR responses.
-- Save raw responses and normalized records to SQLite.
-- Avoid reverse-engineering Roboticket's dynamic vaoKeysForCache parameter.
-
-This is an experimental collector for public data visible in the browser.
-"""
-
-from __future__ import annotations
-
-import argparse
 import asyncio
-import hashlib
 import json
-import sqlite3
+import os
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
+from urllib import request, error
 from urllib.parse import urlparse, parse_qs
 
-from playwright.async_api import async_playwright, Response
+from playwright.async_api import async_playwright
 
-CAPTURE_MARKERS = (
+EVENT_ID = int(os.getenv("EVENT_ID", "8009"))
+PAGE_URL = os.getenv(
+    "ROBOTICKET_URL",
+    f"https://bilety.legia.com/Stadium/Index?eventId={EVENT_ID}",
+)
+SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
+SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
+
+CAPTURE = (
     "GetWGLSeats?",
     "GetWGLSeatsOccInfo?",
     "GetWGLSeatsMyInfo?",
-    "GetWGLSectorsInfo?",
-    "GetWGLSectorsInfoExt?",
-    "GetWGLSeatsInfo?",
-    "GetWGLSeatsInfoExt?",
 )
 
-SCHEMA = """
-PRAGMA journal_mode=WAL;
-
-CREATE TABLE IF NOT EXISTS snapshots (
-    snapshot_id TEXT PRIMARY KEY,
-    event_id INTEGER NOT NULL,
-    captured_at_utc TEXT NOT NULL,
-    page_url TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS raw_responses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    snapshot_id TEXT NOT NULL,
-    captured_at_utc TEXT NOT NULL,
-    endpoint TEXT NOT NULL,
-    request_url TEXT NOT NULL,
-    status_code INTEGER NOT NULL,
-    body_sha256 TEXT NOT NULL,
-    body_json TEXT,
-    FOREIGN KEY(snapshot_id) REFERENCES snapshots(snapshot_id)
-);
-
-CREATE TABLE IF NOT EXISTS seats (
-    event_id INTEGER NOT NULL,
-    seat_id INTEGER NOT NULL,
-    sector_id INTEGER,
-    row_label TEXT,
-    seat_label TEXT,
-    pa_id INTEGER,
-    x INTEGER,
-    y INTEGER,
-    angle INTEGER,
-    first_seen_utc TEXT NOT NULL,
-    last_seen_utc TEXT NOT NULL,
-    PRIMARY KEY(event_id, seat_id)
-);
-
-CREATE TABLE IF NOT EXISTS seat_occupancy (
-    snapshot_id TEXT NOT NULL,
-    captured_at_utc TEXT NOT NULL,
-    event_id INTEGER NOT NULL,
-    seat_id INTEGER NOT NULL,
-    occ INTEGER,
-    any_right INTEGER,
-    has_sg_right INTEGER,
-    has_res_right INTEGER,
-    source_url TEXT NOT NULL,
-    PRIMARY KEY(snapshot_id, seat_id, source_url)
-);
-
-CREATE TABLE IF NOT EXISTS my_seats (
-    snapshot_id TEXT NOT NULL,
-    captured_at_utc TEXT NOT NULL,
-    event_id INTEGER NOT NULL,
-    seat_id INTEGER NOT NULL,
-    source_url TEXT NOT NULL,
-    PRIMARY KEY(snapshot_id, seat_id)
-);
-
-CREATE INDEX IF NOT EXISTS ix_occ_event_seat_time
-ON seat_occupancy(event_id, seat_id, captured_at_utc);
-"""
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-def event_id_from_url(url: str) -> int | None:
+def api(path, method="GET", body=None, prefer=None):
+    data = None if body is None else json.dumps(body).encode()
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+    req = request.Request(
+        f"{SUPABASE_URL}/rest/v1/{path}",
+        data=data,
+        headers=headers,
+        method=method,
+    )
     try:
-        q = parse_qs(urlparse(url).query)
-        value = q.get("eventId", [None])[0]
-        return int(value) if value is not None else None
-    except Exception:
-        return None
+        with request.urlopen(req, timeout=30) as r:
+            raw = r.read().decode()
+            return json.loads(raw) if raw else None
+    except error.HTTPError as e:
+        detail = e.read().decode()
+        raise RuntimeError(f"Supabase {e.code}: {detail}") from e
 
-def endpoint_name(url: str) -> str:
-    return urlparse(url).path.rsplit("/", 1)[-1]
+def create_snapshot():
+    result = api(
+        "snapshots",
+        "POST",
+        {"event_id": EVENT_ID, "source": "roboticket"},
+        "return=representation",
+    )
+    return result[0]["id"]
 
-def json_dump(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-class Store:
-    def __init__(self, db_path: Path, raw_dir: Path):
-        self.db_path = db_path
-        self.raw_dir = raw_dir
-        self.raw_dir.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
-        self.conn.executescript(SCHEMA)
-        self.conn.commit()
-
-    def begin_snapshot(self, snapshot_id: str, event_id: int, page_url: str):
-        self.conn.execute(
-            "INSERT OR REPLACE INTO snapshots(snapshot_id,event_id,captured_at_utc,page_url) VALUES(?,?,?,?)",
-            (snapshot_id, event_id, utc_now(), page_url),
+def upsert_seats(items):
+    rows = []
+    now = datetime.now(timezone.utc).isoformat()
+    for s in items:
+        if not isinstance(s, dict) or "id" not in s:
+            continue
+        rows.append({
+            "event_id": EVENT_ID,
+            "seat_id": s["id"],
+            "sector_id": s.get("sectorId"),
+            "row_label": s.get("row"),
+            "seat_label": s.get("label"),
+            "pa_id": s.get("paId"),
+            "x": s.get("x"),
+            "y": s.get("y"),
+            "angle": s.get("a"),
+            "last_seen_at": now,
+        })
+    for i in range(0, len(rows), 500):
+        api(
+            "seats?on_conflict=event_id,seat_id",
+            "POST",
+            rows[i:i+500],
+            "resolution=merge-duplicates",
         )
-        self.conn.commit()
+    return len(rows)
 
-    def save_response(
-        self,
-        snapshot_id: str,
-        event_id: int,
-        response: Response,
-        data: Any,
-        raw_text: str,
-    ):
-        ts = utc_now()
-        url = response.url
-        endpoint = endpoint_name(url)
-        body_hash = hashlib.sha256(raw_text.encode("utf-8", errors="replace")).hexdigest()
+def insert_occ(snapshot_id, items):
+    rows = []
+    for s in items:
+        if not isinstance(s, dict) or "id" not in s:
+            continue
+        rows.append({
+            "snapshot_id": snapshot_id,
+            "event_id": EVENT_ID,
+            "seat_id": s["id"],
+            "occ": s.get("occ"),
+            "any_right": s.get("anyRight"),
+            "has_sg_right": s.get("hasSgRight"),
+            "has_res_right": s.get("hasResRight"),
+        })
+    for i in range(0, len(rows), 500):
+        api("seat_occupancy", "POST", rows[i:i+500])
+    return len(rows)
 
-        self.conn.execute(
-            """INSERT INTO raw_responses
-               (snapshot_id,captured_at_utc,endpoint,request_url,status_code,body_sha256,body_json)
-               VALUES(?,?,?,?,?,?,?)""",
-            (snapshot_id, ts, endpoint, url, response.status, body_hash, raw_text),
-        )
-
-        safe_ts = ts.replace(":", "-").replace("+", "_")
-        raw_path = self.raw_dir / f"{snapshot_id}_{safe_ts}_{endpoint}_{body_hash[:10]}.json"
-        raw_path.write_text(raw_text, encoding="utf-8")
-
-        if endpoint == "GetWGLSeats":
-            self._save_seats(event_id, ts, data)
-        elif endpoint == "GetWGLSeatsOccInfo":
-            self._save_occ(snapshot_id, event_id, ts, url, data)
-        elif endpoint == "GetWGLSeatsMyInfo":
-            self._save_my(snapshot_id, event_id, ts, url, data)
-
-        self.conn.commit()
-
-    def _save_seats(self, event_id: int, ts: str, data: Any):
-        rows = data.get("seats", []) if isinstance(data, dict) else []
-        for s in rows:
-            if not isinstance(s, dict) or "id" not in s:
-                continue
-            self.conn.execute(
-                """INSERT INTO seats
-                   (event_id,seat_id,sector_id,row_label,seat_label,pa_id,x,y,angle,first_seen_utc,last_seen_utc)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(event_id,seat_id) DO UPDATE SET
-                     sector_id=excluded.sector_id,
-                     row_label=excluded.row_label,
-                     seat_label=excluded.seat_label,
-                     pa_id=excluded.pa_id,
-                     x=excluded.x,
-                     y=excluded.y,
-                     angle=excluded.angle,
-                     last_seen_utc=excluded.last_seen_utc""",
-                (
-                    event_id, s.get("id"), s.get("sectorId"), s.get("row"),
-                    s.get("label"), s.get("paId"), s.get("x"), s.get("y"),
-                    s.get("a"), ts, ts
-                ),
-            )
-
-    def _save_occ(self, snapshot_id: str, event_id: int, ts: str, url: str, data: Any):
-        if not isinstance(data, list):
-            return
-        for s in data:
-            if not isinstance(s, dict) or "id" not in s:
-                continue
-            self.conn.execute(
-                """INSERT OR REPLACE INTO seat_occupancy
-                   (snapshot_id,captured_at_utc,event_id,seat_id,occ,any_right,has_sg_right,has_res_right,source_url)
-                   VALUES(?,?,?,?,?,?,?,?,?)""",
-                (
-                    snapshot_id, ts, event_id, s.get("id"), s.get("occ"),
-                    int(bool(s.get("anyRight"))) if "anyRight" in s else None,
-                    int(bool(s.get("hasSgRight"))) if "hasSgRight" in s else None,
-                    int(bool(s.get("hasResRight"))) if "hasResRight" in s else None,
-                    url,
-                ),
-            )
-
-    def _save_my(self, snapshot_id: str, event_id: int, ts: str, url: str, data: Any):
-        if not isinstance(data, list):
-            return
-        for seat_id in data:
-            if isinstance(seat_id, int):
-                self.conn.execute(
-                    """INSERT OR REPLACE INTO my_seats
-                       (snapshot_id,captured_at_utc,event_id,seat_id,source_url)
-                       VALUES(?,?,?,?,?)""",
-                    (snapshot_id, ts, event_id, seat_id, url),
-                )
-
-    def summary(self, snapshot_id: str, event_id: int):
-        c = self.conn.cursor()
-
-        total_seats = c.execute(
-            "SELECT COUNT(*) FROM seats WHERE event_id=?", (event_id,)
-        ).fetchone()[0]
-
-        occ_rows = c.execute(
-            """SELECT occ, COUNT(DISTINCT seat_id)
-               FROM seat_occupancy
-               WHERE snapshot_id=? AND event_id=?
-               GROUP BY occ ORDER BY occ""",
-            (snapshot_id, event_id),
-        ).fetchall()
-
-        my_count = c.execute(
-            "SELECT COUNT(DISTINCT seat_id) FROM my_seats WHERE snapshot_id=? AND event_id=?",
-            (snapshot_id, event_id),
-        ).fetchone()[0]
-
-        captured_endpoints = c.execute(
-            """SELECT endpoint, COUNT(*) FROM raw_responses
-               WHERE snapshot_id=? GROUP BY endpoint ORDER BY endpoint""",
-            (snapshot_id,),
-        ).fetchall()
-
-        print("\n=== SNAPSHOT SUMMARY ===")
-        print(f"event_id:          {event_id}")
-        print(f"known seat map:    {total_seats:,}")
-        print(f"my seats captured: {my_count}")
-        print("occupancy records:")
-        if occ_rows:
-            for occ, n in occ_rows:
-                print(f"  occ={occ}: {n:,} unique seats")
-        else:
-            print("  none captured")
-        print("captured endpoints:")
-        for ep, n in captured_endpoints:
-            print(f"  {ep}: {n}")
-        print(f"database:          {self.db_path}")
-        print(f"raw responses:     {self.raw_dir}")
+def insert_my(snapshot_id, items):
+    rows = [
+        {"snapshot_id": snapshot_id, "event_id": EVENT_ID, "seat_id": x}
+        for x in items if isinstance(x, int)
+    ]
+    if rows:
+        api("my_seats", "POST", rows)
+    return len(rows)
 
 async def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--event-id", type=int, required=True)
-    parser.add_argument(
-        "--url",
-        help="Stadium URL. Defaults to https://bilety.legia.com/Stadium/Index?eventId=<id>",
-    )
-    parser.add_argument("--seconds", type=int, default=120,
-                        help="How long to keep the browser open and capture responses.")
-    parser.add_argument("--db", default="legia_inventory.sqlite")
-    parser.add_argument("--raw-dir", default="raw")
-    parser.add_argument(
-        "--profile-dir",
-        default=".browser-profile",
-        help="Persistent Chromium profile. Keeps the same session between runs.",
-    )
-    args = parser.parse_args()
+    snapshot_id = create_snapshot()
+    print(f"Created Supabase snapshot {snapshot_id} for event {EVENT_ID}")
 
-    event_id = args.event_id
-    page_url = args.url or f"https://bilety.legia.com/Stadium/Index?eventId={event_id}"
-    snapshot_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-    store = Store(Path(args.db), Path(args.raw_dir))
-    store.begin_snapshot(snapshot_id, event_id, page_url)
-
-    seen_hashes: set[tuple[str, str]] = set()
+    counts = {"seats": 0, "occ": 0, "my": 0}
+    processed = set()
 
     async with async_playwright() as p:
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir=args.profile_dir,
-            headless=False,
-            viewport={"width": 1440, "height": 1000},
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--disable-dev-shm-usage"],
         )
+        page = await browser.new_page(viewport={"width": 1440, "height": 1000})
 
-        page = context.pages[0] if context.pages else await context.new_page()
-
-        async def on_response(response: Response):
+        async def handle(response):
             url = response.url
-            if not any(marker in url for marker in CAPTURE_MARKERS):
+            if not any(x in url for x in CAPTURE):
                 return
-
-            req_event_id = event_id_from_url(url)
-            if req_event_id is not None and req_event_id != event_id:
+            if url in processed:
                 return
 
             try:
-                raw = await response.text()
-            except Exception as exc:
-                print(f"[WARN] Cannot read {endpoint_name(url)}: {exc}")
+                data = await response.json()
+            except Exception:
                 return
 
-            digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
-            key = (url, digest)
-            if key in seen_hashes:
-                return
-            seen_hashes.add(key)
+            processed.add(url)
+            endpoint = urlparse(url).path.rsplit("/", 1)[-1]
 
+            if endpoint == "GetWGLSeats":
+                items = data.get("seats", []) if isinstance(data, dict) else []
+                counts["seats"] += upsert_seats(items)
+                print(f"Captured {len(items)} seat definitions")
+
+            elif endpoint == "GetWGLSeatsOccInfo" and isinstance(data, list):
+                counts["occ"] += insert_occ(snapshot_id, data)
+                print(f"Captured {len(data)} occupancy records")
+
+            elif endpoint == "GetWGLSeatsMyInfo" and isinstance(data, list):
+                counts["my"] += insert_my(snapshot_id, data)
+                print(f"Captured {len(data)} current-session seats")
+
+        page.on("response", handle)
+
+        print(f"Opening {PAGE_URL}")
+        await page.goto(PAGE_URL, wait_until="domcontentloaded", timeout=90000)
+        await page.wait_for_timeout(15000)
+
+        # v0.2 best-effort sector traversal:
+        # click visible elements whose text is a 3-digit sector number.
+        # This deliberately avoids checkout / purchase actions.
+        sector_labels = page.locator("text=/^[1-3][0-9]{2}$/")
+        n = min(await sector_labels.count(), 80)
+        print(f"Visible sector-like labels: {n}")
+
+        for i in range(n):
             try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                print(f"[WARN] Non-JSON response: {url}")
-                return
+                el = sector_labels.nth(i)
+                if not await el.is_visible():
+                    continue
+                await el.click(timeout=2500)
+                await page.wait_for_timeout(1800)
+                # If click navigated to a seat-level view, go back.
+                if "Stadium" in page.url:
+                    await page.go_back(wait_until="domcontentloaded", timeout=15000)
+                    await page.wait_for_timeout(1000)
+            except Exception:
+                continue
 
-            store.save_response(snapshot_id, event_id, response, data, raw)
+        await page.wait_for_timeout(5000)
+        await browser.close()
 
-            extra = ""
-            if isinstance(data, list):
-                extra = f" ({len(data):,} records)"
-            elif isinstance(data, dict) and "seats" in data and isinstance(data["seats"], list):
-                extra = f" ({len(data['seats']):,} seats)"
-            print(f"[CAPTURED] {endpoint_name(url)}{extra}")
-
-        page.on("response", on_response)
-
-        print("\nLegia Ticket Collector v0.1")
-        print(f"Snapshot: {snapshot_id}")
-        print(f"Event:    {event_id}")
-        print(f"URL:      {page_url}")
-        print("\nBrowser will remain open.")
-        print("Navigate around the stadium / click sectors normally.")
-        print("Every matching WGL response will be captured automatically.")
-        print(f"Capture window: {args.seconds} seconds.\n")
-
-        await page.goto(page_url, wait_until="domcontentloaded")
-        await asyncio.sleep(args.seconds)
-
-        store.summary(snapshot_id, event_id)
-        await context.close()
+    print("DONE")
+    print(json.dumps(counts))
+    if counts["seats"] == 0:
+        raise RuntimeError("No Roboticket seat data captured. Workflow did not reach the WGL seat API.")
 
 if __name__ == "__main__":
     asyncio.run(main())
