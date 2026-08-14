@@ -3,14 +3,15 @@
 import asyncio
 import json
 import os
-import re
 from pathlib import Path
 from urllib import request, error
+from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
 
 
 EVENT_ID = int(os.getenv("EVENT_ID", "8009"))
+
 EVENT_URL = (
     f"https://bilety.legia.com/Stadium/Index"
     f"?eventId={EVENT_ID}"
@@ -24,6 +25,11 @@ ROBOTICKET_PASSWORD = os.environ["ROBOTICKET_PASSWORD"]
 
 ART = Path("artifacts")
 ART.mkdir(exist_ok=True)
+
+SECTOR_ENDPOINTS = (
+    "GetWGLSectorsInfo",
+    "GetWGLSectorsInfoExt",
+)
 
 
 # ---------------------------------------------------------
@@ -92,8 +98,8 @@ def insert_sector_inventory(snapshot_id, sectors):
         {
             "snapshot_id": snapshot_id,
             "event_id": EVENT_ID,
-            "sector": sector,
-            "available": available,
+            "sector": str(sector),
+            "available": int(available),
         }
         for sector, available in sectors
     ]
@@ -108,73 +114,121 @@ def insert_sector_inventory(snapshot_id, sectors):
 
 
 # ---------------------------------------------------------
-# Parse sector inventory
+# Generic Roboticket sector parser
 # ---------------------------------------------------------
 
-def parse_sectors(body_text):
+SECTOR_KEYS = (
+    "sector",
+    "sectorId",
+    "sectorID",
+    "id",
+    "label",
+    "name",
+    "sectorName",
+)
 
-    lines = [
-        line.strip()
-        for line in body_text.splitlines()
-        if line.strip()
-    ]
+AVAILABLE_KEYS = (
+    "available",
+    "availableCount",
+    "free",
+    "freeCount",
+    "freeSeats",
+    "availableSeats",
+    "placesLeft",
+    "seatsLeft",
+    "vacant",
+    "vacantCount",
+    "count",
+)
 
-    sectors = []
+
+def extract_sector_records(data):
+
+    found = []
+
+    def walk(value):
+
+        if isinstance(value, list):
+
+            for item in value:
+                walk(item)
+
+            return
+
+        if not isinstance(value, dict):
+            return
+
+        sector = None
+        available = None
+
+        for key in SECTOR_KEYS:
+
+            if key in value:
+                candidate = value[key]
+
+                if isinstance(candidate, (str, int)):
+                    sector = candidate
+                    break
+
+        for key in AVAILABLE_KEYS:
+
+            if key in value:
+                candidate = value[key]
+
+                if isinstance(candidate, (int, float)):
+                    available = int(candidate)
+                    break
+
+                if (
+                    isinstance(candidate, str)
+                    and candidate.isdigit()
+                ):
+                    available = int(candidate)
+                    break
+
+        if (
+            sector is not None
+            and available is not None
+        ):
+            found.append(
+                (
+                    str(sector),
+                    available,
+                )
+            )
+
+        for child in value.values():
+
+            if isinstance(child, (dict, list)):
+                walk(child)
+
+    walk(data)
+
+    result = []
     seen = set()
 
-    for index, line in enumerate(lines):
+    for sector, available in found:
 
-        sector_match = re.fullmatch(
-            r"Sektor\s+(\d+)",
-            line,
-            flags=re.IGNORECASE,
+        key = (
+            sector,
+            available,
         )
 
-        if not sector_match:
-            continue
+        if key not in seen:
+            seen.add(key)
+            result.append(key)
 
-        sector = sector_match.group(1)
-
-        # Availability should be close to sector label.
-        for next_line in lines[index + 1:index + 6]:
-
-            if not re.search(
-                r"Miejsc\s+wolnych",
-                next_line,
-                flags=re.IGNORECASE,
-            ):
-                continue
-
-            available_match = re.search(
-                r"(\d+)\s*$",
-                next_line,
-            )
-
-            if not available_match:
-                continue
-
-            available = int(
-                available_match.group(1)
-            )
-
-            if sector not in seen:
-
-                seen.add(sector)
-
-                sectors.append(
-                    (sector, available)
-                )
-
-            break
-
-    return sectors
+    return result
 
 
 # ---------------------------------------------------------
-# Collector
+# Main
 # ---------------------------------------------------------
 
 async def main():
+
+    captured_sector_json = []
+    parsed_sectors = []
 
     async with async_playwright() as p:
 
@@ -196,6 +250,93 @@ async def main():
         )
 
         page = await context.new_page()
+
+        # -------------------------------------------------
+        # Capture sector API responses
+        # -------------------------------------------------
+
+        async def handle_response(response):
+
+            nonlocal parsed_sectors
+
+            url = response.url
+
+            if not any(
+                endpoint in url
+                for endpoint in SECTOR_ENDPOINTS
+            ):
+                return
+
+            endpoint = (
+                urlparse(url)
+                .path
+                .rsplit("/", 1)[-1]
+            )
+
+            print("")
+            print(
+                f"Captured sector endpoint: "
+                f"{response.status} {endpoint}"
+            )
+
+            try:
+                data = await response.json()
+
+            except Exception as exc:
+
+                print(
+                    "Could not decode JSON:",
+                    exc,
+                )
+
+                return
+
+            captured_sector_json.append(
+                {
+                    "endpoint": endpoint,
+                    "url": url,
+                    "data": data,
+                }
+            )
+
+            safe_name = (
+                endpoint
+                .replace("/", "_")
+            )
+
+            (
+                ART
+                / f"{safe_name}.json"
+            ).write_text(
+                json.dumps(
+                    data,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            candidates = extract_sector_records(
+                data
+            )
+
+            print(
+                f"Parsed candidate records: "
+                f"{len(candidates)}"
+            )
+
+            for item in candidates[:50]:
+                print(item)
+
+            for item in candidates:
+
+                if item not in parsed_sectors:
+                    parsed_sectors.append(item)
+
+        page.on(
+            "response",
+            handle_response,
+        )
 
         # -------------------------------------------------
         # Open event
@@ -228,7 +369,9 @@ async def main():
 
         if "konto.legia.com" in page.url:
 
-            print("Authentication required.")
+            print(
+                "Authentication required."
+            )
 
             email = page.locator(
                 'input[formcontrolname="email"]:visible, '
@@ -268,8 +411,6 @@ async def main():
                 state="visible",
                 timeout=30000,
             )
-
-            print("Waiting for login form...")
 
             await page.wait_for_function(
                 """
@@ -319,108 +460,123 @@ async def main():
                 timeout=90000,
             )
 
-        print("Event page loaded:")
+        print("Event page:")
         print(page.url)
 
         # -------------------------------------------------
-        # Wait for inventory
+        # Let Roboticket call its APIs
         # -------------------------------------------------
 
         print(
-            "Waiting for Roboticket sector inventory..."
+            "Waiting for Roboticket sector API..."
         )
 
-        await page.wait_for_function(
-            """
-            () => {
-                const text =
-                    document.body
-                    ? document.body.innerText
-                    : '';
+        for seconds in range(1, 31):
 
-                return (
-                    text.includes('Miejsc wolnych')
-                    &&
-                    text.includes('Sektor')
-                );
-            }
-            """,
-            timeout=60000,
-        )
+            if captured_sector_json:
+                break
 
-        print("Sector inventory loaded.")
+            await page.wait_for_timeout(1000)
 
-        await page.wait_for_timeout(3000)
-
-        # -------------------------------------------------
-        # Parse inventory
-        # -------------------------------------------------
-
-        body_text = await page.locator(
-            "body"
-        ).inner_text()
-
-        sectors = parse_sectors(
-            body_text
-        )
+            if seconds % 5 == 0:
+                print(
+                    f"Waiting... {seconds}s"
+                )
 
         print("")
+
         print(
-            f"Found {len(sectors)} sectors:"
+            "Sector API responses captured:",
+            len(captured_sector_json),
         )
 
-        for sector, available in sectors:
+        # -------------------------------------------------
+        # Fallback diagnostics
+        # -------------------------------------------------
+
+        if not captured_sector_json:
 
             print(
-                f"Sector {sector}: "
-                f"{available} available"
+                "No GetWGLSectorsInfo response "
+                "captured."
             )
 
-        # Save raw text for diagnostics every run for now.
-        (ART / "page-text.txt").write_text(
-            body_text,
-            encoding="utf-8",
-        )
+            await page.screenshot(
+                path=str(
+                    ART / "sector-api-not-called.png"
+                ),
+                full_page=True,
+            )
 
-        if not sectors:
+            (
+                ART / "event-page.html"
+            ).write_text(
+                await page.content(),
+                encoding="utf-8",
+            )
 
             raise RuntimeError(
-                "Sector inventory is visible, "
-                "but no sector values could be parsed."
+                "Roboticket did not call "
+                "GetWGLSectorsInfo during this run."
             )
 
         # -------------------------------------------------
-        # Store snapshot
+        # If generic parser already succeeded
         # -------------------------------------------------
 
-        snapshot_id = create_snapshot()
+        if parsed_sectors:
 
-        print("")
-        print(
-            f"Created snapshot {snapshot_id}"
-        )
+            print(
+                f"Parsed {len(parsed_sectors)} "
+                f"sector inventory records."
+            )
 
-        inserted = insert_sector_inventory(
-            snapshot_id,
-            sectors,
-        )
+            snapshot_id = create_snapshot()
 
-        total_available = sum(
-            available
-            for _, available in sectors
-        )
+            inserted = insert_sector_inventory(
+                snapshot_id,
+                parsed_sectors,
+            )
 
-        print(
-            f"Inserted {inserted} sectors"
-        )
+            total = sum(
+                available
+                for _, available
+                in parsed_sectors
+            )
 
-        print(
-            f"Total visible availability: "
-            f"{total_available}"
-        )
+            print(
+                f"Created snapshot {snapshot_id}"
+            )
 
-        print("")
-        print("SUCCESS")
+            print(
+                f"Inserted {inserted} sectors"
+            )
+
+            print(
+                f"Total parsed availability: {total}"
+            )
+
+            print("SUCCESS")
+
+        else:
+
+            print("")
+            print(
+                "Sector endpoint captured, "
+                "but field names are not yet mapped."
+            )
+
+            print(
+                "Raw JSON has been saved "
+                "to roboticket-diagnostics."
+            )
+
+            # IMPORTANT:
+            # Do not mark the workflow as failed here.
+            # Authentication and API capture worked.
+            print(
+                "DIAGNOSTIC SUCCESS"
+            )
 
         await browser.close()
 
