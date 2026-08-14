@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 import asyncio
 import json
 import os
@@ -9,8 +10,11 @@ from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
 
+
 EVENT_ID = int(os.getenv("EVENT_ID", "8009"))
+
 HOME_URL = "https://bilety.legia.com/"
+
 EVENT_URL = os.getenv(
     "ROBOTICKET_URL",
     f"https://bilety.legia.com/Stadium/Index?eventId={EVENT_ID}",
@@ -18,6 +22,7 @@ EVENT_URL = os.getenv(
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
+
 ROBOTICKET_USERNAME = os.environ["ROBOTICKET_USERNAME"]
 ROBOTICKET_PASSWORD = os.environ["ROBOTICKET_PASSWORD"]
 
@@ -34,13 +39,20 @@ CAPTURE = (
     "GetWGLSeatsInfoExt?",
 )
 
+
+# -------------------------------------------------------------------
+# SUPABASE
+# -------------------------------------------------------------------
+
 def api(path, method="GET", body=None, prefer=None):
     data = None if body is None else json.dumps(body).encode("utf-8")
+
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
     }
+
     if prefer:
         headers["Prefer"] = prefer
 
@@ -50,69 +62,96 @@ def api(path, method="GET", body=None, prefer=None):
         headers=headers,
         method=method,
     )
+
     try:
-        with request.urlopen(req, timeout=30) as r:
-            raw = r.read().decode("utf-8")
+        with request.urlopen(req, timeout=30) as response:
+            raw = response.read().decode("utf-8")
             return json.loads(raw) if raw else None
-    except error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Supabase {e.code}: {detail}") from e
+
+    except error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Supabase {exc.code}: {detail}"
+        ) from exc
+
 
 def create_snapshot():
     result = api(
         "snapshots",
         "POST",
-        {"event_id": EVENT_ID, "source": "roboticket"},
+        {
+            "event_id": EVENT_ID,
+            "source": "roboticket",
+        },
         "return=representation",
     )
+
     return result[0]["id"]
+
 
 def upsert_seats(items):
     rows = []
+
     now = datetime.now(timezone.utc).isoformat()
-    for s in items:
-        if not isinstance(s, dict) or "id" not in s:
+
+    for seat in items:
+        if not isinstance(seat, dict) or "id" not in seat:
             continue
-        rows.append({
-            "event_id": EVENT_ID,
-            "seat_id": s["id"],
-            "sector_id": s.get("sectorId"),
-            "row_label": s.get("row"),
-            "seat_label": s.get("label"),
-            "pa_id": s.get("paId"),
-            "x": s.get("x"),
-            "y": s.get("y"),
-            "angle": s.get("a"),
-            "last_seen_at": now,
-        })
+
+        rows.append(
+            {
+                "event_id": EVENT_ID,
+                "seat_id": seat["id"],
+                "sector_id": seat.get("sectorId"),
+                "row_label": seat.get("row"),
+                "seat_label": seat.get("label"),
+                "pa_id": seat.get("paId"),
+                "x": seat.get("x"),
+                "y": seat.get("y"),
+                "angle": seat.get("a"),
+                "last_seen_at": now,
+            }
+        )
 
     for i in range(0, len(rows), 500):
         api(
             "seats?on_conflict=event_id,seat_id",
             "POST",
-            rows[i:i+500],
+            rows[i:i + 500],
             "resolution=merge-duplicates",
         )
+
     return len(rows)
+
 
 def insert_occ(snapshot_id, items):
     rows = []
-    for s in items:
-        if not isinstance(s, dict) or "id" not in s:
+
+    for seat in items:
+        if not isinstance(seat, dict) or "id" not in seat:
             continue
-        rows.append({
-            "snapshot_id": snapshot_id,
-            "event_id": EVENT_ID,
-            "seat_id": s["id"],
-            "occ": s.get("occ"),
-            "any_right": s.get("anyRight"),
-            "has_sg_right": s.get("hasSgRight"),
-            "has_res_right": s.get("hasResRight"),
-        })
+
+        rows.append(
+            {
+                "snapshot_id": snapshot_id,
+                "event_id": EVENT_ID,
+                "seat_id": seat["id"],
+                "occ": seat.get("occ"),
+                "any_right": seat.get("anyRight"),
+                "has_sg_right": seat.get("hasSgRight"),
+                "has_res_right": seat.get("hasResRight"),
+            }
+        )
 
     for i in range(0, len(rows), 500):
-        api("seat_occupancy", "POST", rows[i:i+500])
+        api(
+            "seat_occupancy",
+            "POST",
+            rows[i:i + 500],
+        )
+
     return len(rows)
+
 
 def insert_my(snapshot_id, items):
     rows = [
@@ -124,138 +163,336 @@ def insert_my(snapshot_id, items):
         for seat_id in items
         if isinstance(seat_id, int)
     ]
+
     if rows:
-        api("my_seats", "POST", rows)
+        api(
+            "my_seats",
+            "POST",
+            rows,
+        )
+
     return len(rows)
+
+
+# -------------------------------------------------------------------
+# DIAGNOSTICS
+# -------------------------------------------------------------------
 
 async def screenshot(page, name):
     try:
-        await page.screenshot(path=str(ART / name), full_page=True)
+        await page.screenshot(
+            path=str(ART / name),
+            full_page=True,
+        )
     except Exception:
         pass
 
+
+# -------------------------------------------------------------------
+# ROBOTICKET LOGIN
+# -------------------------------------------------------------------
+
 async def login(page):
+
     print("Opening Roboticket home page...")
-    await page.goto(HOME_URL, wait_until="domcontentloaded", timeout=90000)
+
+    await page.goto(
+        HOME_URL,
+        wait_until="domcontentloaded",
+        timeout=90000,
+    )
+
     await page.wait_for_timeout(3000)
 
-    # Try to open the normal supporter login UI.
+    print("Current URL:", page.url)
+
+    # ---------------------------------------------------------------
+    # Open login form
+    # ---------------------------------------------------------------
+
     login_candidates = [
-        page.get_by_role("link", name="Logowanie"),
-        page.get_by_role("button", name="Logowanie"),
-        page.get_by_text("Logowanie", exact=True),
+        page.get_by_role(
+            "link",
+            name="Logowanie",
+            exact=False,
+        ),
+        page.get_by_role(
+            "button",
+            name="Logowanie",
+            exact=False,
+        ),
+        page.get_by_text(
+            "Logowanie",
+            exact=True,
+        ),
     ]
 
     clicked = False
+
     for locator in login_candidates:
         try:
-            if await locator.count() and await locator.first.is_visible():
-                await locator.first.click()
-                clicked = True
+            count = await locator.count()
+
+            if count == 0:
+                continue
+
+            for i in range(count):
+                candidate = locator.nth(i)
+
+                if await candidate.is_visible():
+                    print("Opening login form...")
+                    await candidate.click()
+                    clicked = True
+                    break
+
+            if clicked:
                 break
+
         except Exception:
             continue
 
     if clicked:
         await page.wait_for_timeout(2500)
+    else:
+        print(
+            "Login button not clicked. "
+            "Checking whether login form is already visible..."
+        )
 
-    # Robust selectors: first prefer semantic/placeholder matches,
-    # then standard HTML email/password input types.
+    await screenshot(
+        page,
+        "01-login-page.png",
+    )
+
+    # ---------------------------------------------------------------
+    # Find ONLY visible login fields
+    # ---------------------------------------------------------------
+
     email = page.locator(
-        'input[type="email"], '
-        'input[name*="mail" i], '
-        'input[placeholder*="mail" i]'
+        'input#Email:visible, '
+        'input[type="email"]:visible, '
+        'input[name*="mail" i]:visible, '
+        'input[placeholder*="mail" i]:visible'
     ).first
+
     password = page.locator(
-        'input[type="password"], '
-        'input[name*="password" i], '
-        'input[name*="haslo" i], '
-        'input[placeholder*="has" i]'
+        'input[type="password"]:visible, '
+        'input[name*="password" i]:visible, '
+        'input[name*="haslo" i]:visible, '
+        'input[placeholder*="has" i]:visible'
     ).first
 
-    if not await email.count() or not await password.count():
-        await screenshot(page, "login-form-not-found.png")
-        (ART / "login-page.html").write_text(await page.content(), encoding="utf-8")
-        raise RuntimeError("Roboticket login form not found.")
+    email_count = await email.count()
+    password_count = await password.count()
 
-    await email.fill(ROBOTICKET_USERNAME)
-    await password.fill(ROBOTICKET_PASSWORD)
+    print("Visible email field:", email_count > 0)
+    print("Visible password field:", password_count > 0)
+
+    if not email_count or not password_count:
+
+        await screenshot(
+            page,
+            "02-login-form-not-found.png",
+        )
+
+        (ART / "login-page.html").write_text(
+            await page.content(),
+            encoding="utf-8",
+        )
+
+        raise RuntimeError(
+            "Visible Roboticket login form not found."
+        )
+
+    # ---------------------------------------------------------------
+    # Fill credentials
+    # ---------------------------------------------------------------
+
+    print("Filling login credentials...")
+
+    await email.fill(
+        ROBOTICKET_USERNAME
+    )
+
+    await password.fill(
+        ROBOTICKET_PASSWORD
+    )
+
+    # ---------------------------------------------------------------
+    # Submit
+    # ---------------------------------------------------------------
 
     submit_candidates = [
-        page.get_by_role("button", name="Zaloguj"),
-        page.get_by_role("button", name="Zaloguj się"),
-        page.locator('button[type="submit"]'),
-        page.locator('input[type="submit"]'),
+        page.get_by_role(
+            "button",
+            name="Zaloguj",
+            exact=False,
+        ),
+        page.locator(
+            'button[type="submit"]:visible'
+        ),
+        page.locator(
+            'input[type="submit"]:visible'
+        ),
     ]
 
     submitted = False
+
     for locator in submit_candidates:
         try:
-            if await locator.count() and await locator.first.is_visible():
-                await locator.first.click()
-                submitted = True
+            count = await locator.count()
+
+            if count == 0:
+                continue
+
+            for i in range(count):
+                candidate = locator.nth(i)
+
+                if await candidate.is_visible():
+                    print("Submitting login...")
+                    await candidate.click()
+                    submitted = True
+                    break
+
+            if submitted:
                 break
+
         except Exception:
             continue
 
     if not submitted:
-        await screenshot(page, "login-submit-not-found.png")
-        raise RuntimeError("Roboticket login submit control not found.")
 
+        await screenshot(
+            page,
+            "03-login-submit-not-found.png",
+        )
+
+        raise RuntimeError(
+            "Visible Roboticket login submit control not found."
+        )
+
+    # Wait for authentication / redirect
     await page.wait_for_timeout(5000)
 
-    # We deliberately don't log cookies, tokens or account data.
-    # A visible password input after submit is a strong signal login failed.
-    visible_password = False
-    try:
-        visible_password = await password.is_visible()
-    except Exception:
-        pass
+    print(
+        "Login submitted. Current page:",
+        page.url,
+    )
 
-    body_text = (await page.locator("body").inner_text()).lower()
+    await screenshot(
+        page,
+        "04-after-login.png",
+    )
 
-    if visible_password and (
-        "nieprawid" in body_text
-        or "błęd" in body_text
-        or "invalid" in body_text
-        or "incorrect" in body_text
+    # ---------------------------------------------------------------
+    # Basic failed-login detection
+    # ---------------------------------------------------------------
+
+    body_text = (
+        await page.locator("body").inner_text()
+    ).lower()
+
+    failed_markers = (
+        "nieprawidł",
+        "nieprawidlow",
+        "błędne hasło",
+        "bledne haslo",
+        "invalid password",
+        "incorrect password",
+    )
+
+    if any(
+        marker in body_text
+        for marker in failed_markers
     ):
-        await screenshot(page, "login-failed.png")
-        raise RuntimeError("Roboticket rejected the login credentials.")
 
-    print("Login submitted. Current page:", page.url)
+        await screenshot(
+            page,
+            "05-login-failed.png",
+        )
+
+        raise RuntimeError(
+            "Roboticket rejected the login credentials."
+        )
+
+    print("Login step completed.")
+
+
+# -------------------------------------------------------------------
+# MAIN COLLECTOR
+# -------------------------------------------------------------------
 
 async def main():
-    snapshot_id = create_snapshot()
-    print(f"Created Supabase snapshot {snapshot_id} for event {EVENT_ID}")
 
-    counts = {"seats": 0, "occ": 0, "my": 0}
+    snapshot_id = create_snapshot()
+
+    print(
+        f"Created Supabase snapshot "
+        f"{snapshot_id} for event {EVENT_ID}"
+    )
+
+    counts = {
+        "seats": 0,
+        "occ": 0,
+        "my": 0,
+    }
+
     captured_urls = set()
     console_lines = []
 
     async with async_playwright() as p:
+
         browser = await p.chromium.launch(
             headless=True,
-            args=["--disable-dev-shm-usage", "--no-sandbox"],
+            args=[
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+            ],
         )
 
         context = await browser.new_context(
-            viewport={"width": 1440, "height": 1000},
+            viewport={
+                "width": 1440,
+                "height": 1000,
+            },
             locale="pl-PL",
             timezone_id="Europe/Warsaw",
         )
+
         page = await context.new_page()
 
-        page.on("console", lambda m: console_lines.append(f"{m.type}: {m.text}"))
-        page.on("pageerror", lambda e: console_lines.append(f"PAGEERROR: {e}"))
+        # -----------------------------------------------------------
+        # Browser diagnostics
+        # -----------------------------------------------------------
+
+        page.on(
+            "console",
+            lambda message: console_lines.append(
+                f"{message.type}: {message.text}"
+            ),
+        )
+
+        page.on(
+            "pageerror",
+            lambda exc: console_lines.append(
+                f"PAGEERROR: {exc}"
+            ),
+        )
+
+        # -----------------------------------------------------------
+        # Capture Roboticket WGL responses
+        # -----------------------------------------------------------
 
         async def handle(response):
+
             url = response.url
-            if not any(marker in url for marker in CAPTURE):
+
+            if not any(
+                marker in url
+                for marker in CAPTURE
+            ):
                 return
 
-            # Avoid writing the identical response URL more than once
-            # during this single run.
             if url in captured_urls:
                 return
 
@@ -265,61 +502,168 @@ async def main():
                 return
 
             captured_urls.add(url)
-            endpoint = urlparse(url).path.rsplit("/", 1)[-1]
-            print(f"Captured {response.status}: {endpoint}")
+
+            endpoint = (
+                urlparse(url)
+                .path
+                .rsplit("/", 1)[-1]
+            )
+
+            print(
+                f"Captured {response.status}: "
+                f"{endpoint}"
+            )
+
+            # -------------------------------------------------------
+            # Seat definitions
+            # -------------------------------------------------------
 
             if endpoint == "GetWGLSeats":
-                items = data.get("seats", []) if isinstance(data, dict) else []
-                counts["seats"] += upsert_seats(items)
-                print(f"  seat definitions: {len(items)}")
 
-            elif endpoint == "GetWGLSeatsOccInfo" and isinstance(data, list):
-                counts["occ"] += insert_occ(snapshot_id, data)
-                print(f"  occupancy records: {len(data)}")
+                items = (
+                    data.get("seats", [])
+                    if isinstance(data, dict)
+                    else []
+                )
 
-            elif endpoint == "GetWGLSeatsMyInfo" and isinstance(data, list):
-                counts["my"] += insert_my(snapshot_id, data)
-                print(f"  session seats: {len(data)}")
+                count = upsert_seats(items)
 
-        page.on("response", handle)
+                counts["seats"] += count
+
+                print(
+                    f"  seat definitions: {len(items)}"
+                )
+
+            # -------------------------------------------------------
+            # Occupancy
+            # -------------------------------------------------------
+
+            elif (
+                endpoint == "GetWGLSeatsOccInfo"
+                and isinstance(data, list)
+            ):
+
+                count = insert_occ(
+                    snapshot_id,
+                    data,
+                )
+
+                counts["occ"] += count
+
+                print(
+                    f"  occupancy records: {len(data)}"
+                )
+
+            # -------------------------------------------------------
+            # Seats associated with current session
+            # -------------------------------------------------------
+
+            elif (
+                endpoint == "GetWGLSeatsMyInfo"
+                and isinstance(data, list)
+            ):
+
+                count = insert_my(
+                    snapshot_id,
+                    data,
+                )
+
+                counts["my"] += count
+
+                print(
+                    f"  session seats: {len(data)}"
+                )
+
+        page.on(
+            "response",
+            handle,
+        )
+
+        # -----------------------------------------------------------
+        # LOGIN
+        # -----------------------------------------------------------
 
         await login(page)
 
-        print(f"Opening event {EVENT_ID}...")
+        # -----------------------------------------------------------
+        # OPEN EVENT
+        # -----------------------------------------------------------
+
+        print(
+            f"Opening event {EVENT_ID}..."
+        )
+
         response = await page.goto(
             EVENT_URL,
             wait_until="domcontentloaded",
             timeout=90000,
         )
-        print("Event HTTP status:", response.status if response else "none")
-        print("Event final URL:", page.url)
-        print("Event title:", await page.title())
 
+        print(
+            "Event HTTP status:",
+            response.status
+            if response
+            else "none",
+        )
+
+        print(
+            "Event final URL:",
+            page.url,
+        )
+
+        print(
+            "Event title:",
+            await page.title(),
+        )
+
+        # Roboticket loads the stadium asynchronously.
         await page.wait_for_timeout(20000)
-        await screenshot(page, "event-page.png")
 
-        # Give JS more time to request stadium/map data.
+        await screenshot(
+            page,
+            "06-event-page.png",
+        )
+
+        # Additional time for WGL XHR requests.
         await page.wait_for_timeout(10000)
+
+        # -----------------------------------------------------------
+        # Save diagnostics
+        # -----------------------------------------------------------
 
         (ART / "console.txt").write_text(
             "\n".join(console_lines),
             encoding="utf-8",
         )
+
         (ART / "event-page.html").write_text(
             await page.content(),
             encoding="utf-8",
         )
 
         print("DONE")
-        print(json.dumps(counts))
+
+        print(
+            json.dumps(
+                counts,
+                indent=2,
+            )
+        )
 
         await browser.close()
 
+    # ---------------------------------------------------------------
+    # Validate result
+    # ---------------------------------------------------------------
+
     if counts["seats"] == 0:
+
         raise RuntimeError(
             "Login completed but no WGL seat data was captured. "
-            "Download the roboticket-diagnostics artifact from this run."
+            "Download the roboticket-diagnostics artifact "
+            "from this workflow run."
         )
+
 
 if __name__ == "__main__":
     asyncio.run(main())
