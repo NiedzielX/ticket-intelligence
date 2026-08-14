@@ -3,27 +3,39 @@ import asyncio
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib import request, error
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
 
 EVENT_ID = int(os.getenv("EVENT_ID", "8009"))
-PAGE_URL = os.getenv(
+HOME_URL = "https://bilety.legia.com/"
+EVENT_URL = os.getenv(
     "ROBOTICKET_URL",
     f"https://bilety.legia.com/Stadium/Index?eventId={EVENT_ID}",
 )
+
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
+ROBOTICKET_USERNAME = os.environ["ROBOTICKET_USERNAME"]
+ROBOTICKET_PASSWORD = os.environ["ROBOTICKET_PASSWORD"]
+
+ART = Path("artifacts")
+ART.mkdir(exist_ok=True)
 
 CAPTURE = (
     "GetWGLSeats?",
     "GetWGLSeatsOccInfo?",
     "GetWGLSeatsMyInfo?",
+    "GetWGLSectorsInfo?",
+    "GetWGLSectorsInfoExt?",
+    "GetWGLSeatsInfo?",
+    "GetWGLSeatsInfoExt?",
 )
 
 def api(path, method="GET", body=None, prefer=None):
-    data = None if body is None else json.dumps(body).encode()
+    data = None if body is None else json.dumps(body).encode("utf-8")
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -31,6 +43,7 @@ def api(path, method="GET", body=None, prefer=None):
     }
     if prefer:
         headers["Prefer"] = prefer
+
     req = request.Request(
         f"{SUPABASE_URL}/rest/v1/{path}",
         data=data,
@@ -39,10 +52,10 @@ def api(path, method="GET", body=None, prefer=None):
     )
     try:
         with request.urlopen(req, timeout=30) as r:
-            raw = r.read().decode()
+            raw = r.read().decode("utf-8")
             return json.loads(raw) if raw else None
     except error.HTTPError as e:
-        detail = e.read().decode()
+        detail = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Supabase {e.code}: {detail}") from e
 
 def create_snapshot():
@@ -72,6 +85,7 @@ def upsert_seats(items):
             "angle": s.get("a"),
             "last_seen_at": now,
         })
+
     for i in range(0, len(rows), 500):
         api(
             "seats?on_conflict=event_id,seat_id",
@@ -95,38 +109,154 @@ def insert_occ(snapshot_id, items):
             "has_sg_right": s.get("hasSgRight"),
             "has_res_right": s.get("hasResRight"),
         })
+
     for i in range(0, len(rows), 500):
         api("seat_occupancy", "POST", rows[i:i+500])
     return len(rows)
 
 def insert_my(snapshot_id, items):
     rows = [
-        {"snapshot_id": snapshot_id, "event_id": EVENT_ID, "seat_id": x}
-        for x in items if isinstance(x, int)
+        {
+            "snapshot_id": snapshot_id,
+            "event_id": EVENT_ID,
+            "seat_id": seat_id,
+        }
+        for seat_id in items
+        if isinstance(seat_id, int)
     ]
     if rows:
         api("my_seats", "POST", rows)
     return len(rows)
+
+async def screenshot(page, name):
+    try:
+        await page.screenshot(path=str(ART / name), full_page=True)
+    except Exception:
+        pass
+
+async def login(page):
+    print("Opening Roboticket home page...")
+    await page.goto(HOME_URL, wait_until="domcontentloaded", timeout=90000)
+    await page.wait_for_timeout(3000)
+
+    # Try to open the normal supporter login UI.
+    login_candidates = [
+        page.get_by_role("link", name="Logowanie"),
+        page.get_by_role("button", name="Logowanie"),
+        page.get_by_text("Logowanie", exact=True),
+    ]
+
+    clicked = False
+    for locator in login_candidates:
+        try:
+            if await locator.count() and await locator.first.is_visible():
+                await locator.first.click()
+                clicked = True
+                break
+        except Exception:
+            continue
+
+    if clicked:
+        await page.wait_for_timeout(2500)
+
+    # Robust selectors: first prefer semantic/placeholder matches,
+    # then standard HTML email/password input types.
+    email = page.locator(
+        'input[type="email"], '
+        'input[name*="mail" i], '
+        'input[placeholder*="mail" i]'
+    ).first
+    password = page.locator(
+        'input[type="password"], '
+        'input[name*="password" i], '
+        'input[name*="haslo" i], '
+        'input[placeholder*="has" i]'
+    ).first
+
+    if not await email.count() or not await password.count():
+        await screenshot(page, "login-form-not-found.png")
+        (ART / "login-page.html").write_text(await page.content(), encoding="utf-8")
+        raise RuntimeError("Roboticket login form not found.")
+
+    await email.fill(ROBOTICKET_USERNAME)
+    await password.fill(ROBOTICKET_PASSWORD)
+
+    submit_candidates = [
+        page.get_by_role("button", name="Zaloguj"),
+        page.get_by_role("button", name="Zaloguj się"),
+        page.locator('button[type="submit"]'),
+        page.locator('input[type="submit"]'),
+    ]
+
+    submitted = False
+    for locator in submit_candidates:
+        try:
+            if await locator.count() and await locator.first.is_visible():
+                await locator.first.click()
+                submitted = True
+                break
+        except Exception:
+            continue
+
+    if not submitted:
+        await screenshot(page, "login-submit-not-found.png")
+        raise RuntimeError("Roboticket login submit control not found.")
+
+    await page.wait_for_timeout(5000)
+
+    # We deliberately don't log cookies, tokens or account data.
+    # A visible password input after submit is a strong signal login failed.
+    visible_password = False
+    try:
+        visible_password = await password.is_visible()
+    except Exception:
+        pass
+
+    body_text = (await page.locator("body").inner_text()).lower()
+
+    if visible_password and (
+        "nieprawid" in body_text
+        or "błęd" in body_text
+        or "invalid" in body_text
+        or "incorrect" in body_text
+    ):
+        await screenshot(page, "login-failed.png")
+        raise RuntimeError("Roboticket rejected the login credentials.")
+
+    print("Login submitted. Current page:", page.url)
 
 async def main():
     snapshot_id = create_snapshot()
     print(f"Created Supabase snapshot {snapshot_id} for event {EVENT_ID}")
 
     counts = {"seats": 0, "occ": 0, "my": 0}
-    processed = set()
+    captured_urls = set()
+    console_lines = []
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--disable-dev-shm-usage"],
+            args=["--disable-dev-shm-usage", "--no-sandbox"],
         )
-        page = await browser.new_page(viewport={"width": 1440, "height": 1000})
+
+        context = await browser.new_context(
+            viewport={"width": 1440, "height": 1000},
+            locale="pl-PL",
+            timezone_id="Europe/Warsaw",
+        )
+        page = await context.new_page()
+
+        page.on("console", lambda m: console_lines.append(f"{m.type}: {m.text}"))
+        page.on("pageerror", lambda e: console_lines.append(f"PAGEERROR: {e}"))
 
         async def handle(response):
             url = response.url
-            if not any(x in url for x in CAPTURE):
+            if not any(marker in url for marker in CAPTURE):
                 return
-            if url in processed:
+
+            # Avoid writing the identical response URL more than once
+            # during this single run.
+            if url in captured_urls:
                 return
 
             try:
@@ -134,56 +264,62 @@ async def main():
             except Exception:
                 return
 
-            processed.add(url)
+            captured_urls.add(url)
             endpoint = urlparse(url).path.rsplit("/", 1)[-1]
+            print(f"Captured {response.status}: {endpoint}")
 
             if endpoint == "GetWGLSeats":
                 items = data.get("seats", []) if isinstance(data, dict) else []
                 counts["seats"] += upsert_seats(items)
-                print(f"Captured {len(items)} seat definitions")
+                print(f"  seat definitions: {len(items)}")
 
             elif endpoint == "GetWGLSeatsOccInfo" and isinstance(data, list):
                 counts["occ"] += insert_occ(snapshot_id, data)
-                print(f"Captured {len(data)} occupancy records")
+                print(f"  occupancy records: {len(data)}")
 
             elif endpoint == "GetWGLSeatsMyInfo" and isinstance(data, list):
                 counts["my"] += insert_my(snapshot_id, data)
-                print(f"Captured {len(data)} current-session seats")
+                print(f"  session seats: {len(data)}")
 
         page.on("response", handle)
 
-        print(f"Opening {PAGE_URL}")
-        await page.goto(PAGE_URL, wait_until="domcontentloaded", timeout=90000)
-        await page.wait_for_timeout(15000)
+        await login(page)
 
-        # v0.2 best-effort sector traversal:
-        # click visible elements whose text is a 3-digit sector number.
-        # This deliberately avoids checkout / purchase actions.
-        sector_labels = page.locator("text=/^[1-3][0-9]{2}$/")
-        n = min(await sector_labels.count(), 80)
-        print(f"Visible sector-like labels: {n}")
+        print(f"Opening event {EVENT_ID}...")
+        response = await page.goto(
+            EVENT_URL,
+            wait_until="domcontentloaded",
+            timeout=90000,
+        )
+        print("Event HTTP status:", response.status if response else "none")
+        print("Event final URL:", page.url)
+        print("Event title:", await page.title())
 
-        for i in range(n):
-            try:
-                el = sector_labels.nth(i)
-                if not await el.is_visible():
-                    continue
-                await el.click(timeout=2500)
-                await page.wait_for_timeout(1800)
-                # If click navigated to a seat-level view, go back.
-                if "Stadium" in page.url:
-                    await page.go_back(wait_until="domcontentloaded", timeout=15000)
-                    await page.wait_for_timeout(1000)
-            except Exception:
-                continue
+        await page.wait_for_timeout(20000)
+        await screenshot(page, "event-page.png")
 
-        await page.wait_for_timeout(5000)
+        # Give JS more time to request stadium/map data.
+        await page.wait_for_timeout(10000)
+
+        (ART / "console.txt").write_text(
+            "\n".join(console_lines),
+            encoding="utf-8",
+        )
+        (ART / "event-page.html").write_text(
+            await page.content(),
+            encoding="utf-8",
+        )
+
+        print("DONE")
+        print(json.dumps(counts))
+
         await browser.close()
 
-    print("DONE")
-    print(json.dumps(counts))
     if counts["seats"] == 0:
-        raise RuntimeError("No Roboticket seat data captured. Workflow did not reach the WGL seat API.")
+        raise RuntimeError(
+            "Login completed but no WGL seat data was captured. "
+            "Download the roboticket-diagnostics artifact from this run."
+        )
 
 if __name__ == "__main__":
     asyncio.run(main())
