@@ -3,7 +3,6 @@
 import asyncio
 import json
 import os
-from pathlib import Path
 from urllib import request, error
 from urllib.parse import urlparse
 
@@ -23,18 +22,8 @@ SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
 ROBOTICKET_USERNAME = os.environ["ROBOTICKET_USERNAME"]
 ROBOTICKET_PASSWORD = os.environ["ROBOTICKET_PASSWORD"]
 
-ART = Path("artifacts")
-ART.mkdir(exist_ok=True)
+SECTOR_INFO_ENDPOINT = "GetWGLSectorsInfo"
 
-SECTOR_ENDPOINTS = (
-    "GetWGLSectorsInfo",
-    "GetWGLSectorsInfoExt",
-)
-
-
-# ---------------------------------------------------------
-# Supabase
-# ---------------------------------------------------------
 
 def api(path, method="GET", body=None, prefer=None):
 
@@ -92,16 +81,54 @@ def create_snapshot():
     return result[0]["id"]
 
 
-def insert_sector_inventory(snapshot_id, sectors):
+def parse_sector_inventory(data):
+
+    sectors = []
+
+    for sector in data.get("sectors", []):
+
+        sector_id = sector.get("id")
+
+        if sector_id is None:
+            continue
+
+        free_seats = 0
+
+        for price_area in sector.get(
+            "freeSeatsByPriceArea",
+            [],
+        ):
+            free_seats += int(
+                price_area.get(
+                    "freeSeatsNo",
+                    0,
+                )
+            )
+
+        sectors.append(
+            (
+                str(sector_id),
+                free_seats,
+            )
+        )
+
+    return sectors
+
+
+def insert_sector_inventory(
+    snapshot_id,
+    sectors,
+):
 
     rows = [
         {
             "snapshot_id": snapshot_id,
             "event_id": EVENT_ID,
-            "sector": str(sector),
-            "available": int(available),
+            "sector": sector_id,
+            "available": available,
         }
-        for sector, available in sectors
+        for sector_id, available
+        in sectors
     ]
 
     api(
@@ -113,122 +140,9 @@ def insert_sector_inventory(snapshot_id, sectors):
     return len(rows)
 
 
-# ---------------------------------------------------------
-# Generic Roboticket sector parser
-# ---------------------------------------------------------
-
-SECTOR_KEYS = (
-    "sector",
-    "sectorId",
-    "sectorID",
-    "id",
-    "label",
-    "name",
-    "sectorName",
-)
-
-AVAILABLE_KEYS = (
-    "available",
-    "availableCount",
-    "free",
-    "freeCount",
-    "freeSeats",
-    "availableSeats",
-    "placesLeft",
-    "seatsLeft",
-    "vacant",
-    "vacantCount",
-    "count",
-)
-
-
-def extract_sector_records(data):
-
-    found = []
-
-    def walk(value):
-
-        if isinstance(value, list):
-
-            for item in value:
-                walk(item)
-
-            return
-
-        if not isinstance(value, dict):
-            return
-
-        sector = None
-        available = None
-
-        for key in SECTOR_KEYS:
-
-            if key in value:
-                candidate = value[key]
-
-                if isinstance(candidate, (str, int)):
-                    sector = candidate
-                    break
-
-        for key in AVAILABLE_KEYS:
-
-            if key in value:
-                candidate = value[key]
-
-                if isinstance(candidate, (int, float)):
-                    available = int(candidate)
-                    break
-
-                if (
-                    isinstance(candidate, str)
-                    and candidate.isdigit()
-                ):
-                    available = int(candidate)
-                    break
-
-        if (
-            sector is not None
-            and available is not None
-        ):
-            found.append(
-                (
-                    str(sector),
-                    available,
-                )
-            )
-
-        for child in value.values():
-
-            if isinstance(child, (dict, list)):
-                walk(child)
-
-    walk(data)
-
-    result = []
-    seen = set()
-
-    for sector, available in found:
-
-        key = (
-            sector,
-            available,
-        )
-
-        if key not in seen:
-            seen.add(key)
-            result.append(key)
-
-    return result
-
-
-# ---------------------------------------------------------
-# Main
-# ---------------------------------------------------------
-
 async def main():
 
-    captured_sector_json = []
-    parsed_sectors = []
+    sector_data = None
 
     async with async_playwright() as p:
 
@@ -252,86 +166,27 @@ async def main():
         page = await context.new_page()
 
         # -------------------------------------------------
-        # Capture sector API responses
+        # Capture actual Roboticket sector API
         # -------------------------------------------------
 
         async def handle_response(response):
 
-            nonlocal parsed_sectors
+            nonlocal sector_data
 
-            url = response.url
-
-            if not any(
-                endpoint in url
-                for endpoint in SECTOR_ENDPOINTS
-            ):
+            if SECTOR_INFO_ENDPOINT not in response.url:
                 return
-
-            endpoint = (
-                urlparse(url)
-                .path
-                .rsplit("/", 1)[-1]
-            )
-
-            print("")
-            print(
-                f"Captured sector endpoint: "
-                f"{response.status} {endpoint}"
-            )
 
             try:
                 data = await response.json()
-
-            except Exception as exc:
-
-                print(
-                    "Could not decode JSON:",
-                    exc,
-                )
-
+            except Exception:
                 return
 
-            captured_sector_json.append(
-                {
-                    "endpoint": endpoint,
-                    "url": url,
-                    "data": data,
-                }
-            )
-
-            safe_name = (
-                endpoint
-                .replace("/", "_")
-            )
-
-            (
-                ART
-                / f"{safe_name}.json"
-            ).write_text(
-                json.dumps(
-                    data,
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-
-            candidates = extract_sector_records(
-                data
-            )
+            sector_data = data
 
             print(
-                f"Parsed candidate records: "
-                f"{len(candidates)}"
+                f"Captured {response.status}: "
+                f"{urlparse(response.url).path.rsplit('/', 1)[-1]}"
             )
-
-            for item in candidates[:50]:
-                print(item)
-
-            for item in candidates:
-
-                if item not in parsed_sectors:
-                    parsed_sectors.append(item)
 
         page.on(
             "response",
@@ -353,7 +208,9 @@ async def main():
 
         print(
             "Initial status:",
-            response.status if response else "none",
+            response.status
+            if response
+            else "none",
         )
 
         print(
@@ -446,12 +303,13 @@ async def main():
             print(page.url)
 
         # -------------------------------------------------
-        # Ensure event
+        # Ensure exact event
         # -------------------------------------------------
 
         if (
             "bilety.legia.com" not in page.url
-            or f"eventId={EVENT_ID}" not in page.url
+            or
+            f"eventId={EVENT_ID}" not in page.url
         ):
 
             await page.goto(
@@ -464,119 +322,85 @@ async def main():
         print(page.url)
 
         # -------------------------------------------------
-        # Let Roboticket call its APIs
+        # Wait for sector API
         # -------------------------------------------------
 
         print(
-            "Waiting for Roboticket sector API..."
+            "Waiting for GetWGLSectorsInfo..."
         )
 
-        for seconds in range(1, 31):
+        for second in range(1, 31):
 
-            if captured_sector_json:
+            if sector_data is not None:
                 break
 
             await page.wait_for_timeout(1000)
 
-            if seconds % 5 == 0:
-                print(
-                    f"Waiting... {seconds}s"
-                )
-
-        print("")
-
-        print(
-            "Sector API responses captured:",
-            len(captured_sector_json),
-        )
-
-        # -------------------------------------------------
-        # Fallback diagnostics
-        # -------------------------------------------------
-
-        if not captured_sector_json:
-
-            print(
-                "No GetWGLSectorsInfo response "
-                "captured."
-            )
-
-            await page.screenshot(
-                path=str(
-                    ART / "sector-api-not-called.png"
-                ),
-                full_page=True,
-            )
-
-            (
-                ART / "event-page.html"
-            ).write_text(
-                await page.content(),
-                encoding="utf-8",
-            )
+        if sector_data is None:
 
             raise RuntimeError(
-                "Roboticket did not call "
-                "GetWGLSectorsInfo during this run."
+                "GetWGLSectorsInfo was not captured."
             )
 
         # -------------------------------------------------
-        # If generic parser already succeeded
+        # Parse actual API payload
         # -------------------------------------------------
 
-        if parsed_sectors:
+        sectors = parse_sector_inventory(
+            sector_data
+        )
+
+        if not sectors:
+
+            raise RuntimeError(
+                "GetWGLSectorsInfo returned no sectors."
+            )
+
+        print("")
+        print(
+            f"Found {len(sectors)} sectors:"
+        )
+
+        for sector_id, available in sectors:
 
             print(
-                f"Parsed {len(parsed_sectors)} "
-                f"sector inventory records."
+                f"Sector ID {sector_id}: "
+                f"{available} available"
             )
 
-            snapshot_id = create_snapshot()
+        # -------------------------------------------------
+        # Persist
+        # -------------------------------------------------
 
-            inserted = insert_sector_inventory(
-                snapshot_id,
-                parsed_sectors,
-            )
+        snapshot_id = create_snapshot()
 
-            total = sum(
-                available
-                for _, available
-                in parsed_sectors
-            )
+        inserted = insert_sector_inventory(
+            snapshot_id,
+            sectors,
+        )
 
-            print(
-                f"Created snapshot {snapshot_id}"
-            )
+        total_available = sum(
+            available
+            for _, available
+            in sectors
+        )
 
-            print(
-                f"Inserted {inserted} sectors"
-            )
+        print("")
+        print(
+            f"Created snapshot {snapshot_id}"
+        )
 
-            print(
-                f"Total parsed availability: {total}"
-            )
+        print(
+            f"Inserted {inserted} sector records"
+        )
 
-            print("SUCCESS")
+        print(
+            f"Total available seats: "
+            f"{total_available}"
+        )
 
-        else:
-
-            print("")
-            print(
-                "Sector endpoint captured, "
-                "but field names are not yet mapped."
-            )
-
-            print(
-                "Raw JSON has been saved "
-                "to roboticket-diagnostics."
-            )
-
-            # IMPORTANT:
-            # Do not mark the workflow as failed here.
-            # Authentication and API capture worked.
-            print(
-                "DIAGNOSTIC SUCCESS"
-            )
+        print("")
+        print("SUCCESS")
 
         await browser.close()
 
