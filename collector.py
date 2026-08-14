@@ -11,7 +11,6 @@ from playwright.async_api import async_playwright
 
 
 EVENT_ID = int(os.getenv("EVENT_ID", "8009"))
-
 EVENT_URL = (
     f"https://bilety.legia.com/Stadium/Index"
     f"?eventId={EVENT_ID}"
@@ -57,9 +56,7 @@ def api(path, method="GET", body=None, prefer=None):
 
     try:
         with request.urlopen(req, timeout=30) as response:
-
             raw = response.read().decode("utf-8")
-
             return json.loads(raw) if raw else None
 
     except error.HTTPError as exc:
@@ -111,6 +108,69 @@ def insert_sector_inventory(snapshot_id, sectors):
 
 
 # ---------------------------------------------------------
+# Parse sector inventory
+# ---------------------------------------------------------
+
+def parse_sectors(body_text):
+
+    lines = [
+        line.strip()
+        for line in body_text.splitlines()
+        if line.strip()
+    ]
+
+    sectors = []
+    seen = set()
+
+    for index, line in enumerate(lines):
+
+        sector_match = re.fullmatch(
+            r"Sektor\s+(\d+)",
+            line,
+            flags=re.IGNORECASE,
+        )
+
+        if not sector_match:
+            continue
+
+        sector = sector_match.group(1)
+
+        # Availability should be close to sector label.
+        for next_line in lines[index + 1:index + 6]:
+
+            if not re.search(
+                r"Miejsc\s+wolnych",
+                next_line,
+                flags=re.IGNORECASE,
+            ):
+                continue
+
+            available_match = re.search(
+                r"(\d+)\s*$",
+                next_line,
+            )
+
+            if not available_match:
+                continue
+
+            available = int(
+                available_match.group(1)
+            )
+
+            if sector not in seen:
+
+                seen.add(sector)
+
+                sectors.append(
+                    (sector, available)
+                )
+
+            break
+
+    return sectors
+
+
+# ---------------------------------------------------------
 # Collector
 # ---------------------------------------------------------
 
@@ -138,7 +198,7 @@ async def main():
         page = await context.new_page()
 
         # -------------------------------------------------
-        # 1. Open protected event
+        # Open event
         # -------------------------------------------------
 
         print("Opening event:")
@@ -163,7 +223,7 @@ async def main():
         await page.wait_for_timeout(2000)
 
         # -------------------------------------------------
-        # 2. Login
+        # Login
         # -------------------------------------------------
 
         if "konto.legia.com" in page.url:
@@ -245,15 +305,13 @@ async def main():
             print(page.url)
 
         # -------------------------------------------------
-        # 3. Ensure exact event page
+        # Ensure event
         # -------------------------------------------------
 
         if (
             "bilety.legia.com" not in page.url
             or f"eventId={EVENT_ID}" not in page.url
         ):
-
-            print("Opening exact event page...")
 
             await page.goto(
                 EVENT_URL,
@@ -265,109 +323,46 @@ async def main():
         print(page.url)
 
         # -------------------------------------------------
-        # 4. WAIT FOR ACTUAL STADIUM INVENTORY
+        # Wait for inventory
         # -------------------------------------------------
 
         print(
-            "Waiting for Roboticket "
-            "sector inventory..."
+            "Waiting for Roboticket sector inventory..."
         )
 
-        try:
+        await page.wait_for_function(
+            """
+            () => {
+                const text =
+                    document.body
+                    ? document.body.innerText
+                    : '';
 
-            await page.wait_for_function(
-                """
-                () => {
-                    const text =
-                        document.body
-                        ? document.body.innerText
-                        : '';
+                return (
+                    text.includes('Miejsc wolnych')
+                    &&
+                    text.includes('Sektor')
+                );
+            }
+            """,
+            timeout=60000,
+        )
 
-                    return (
-                        text.includes('Miejsc wolnych')
-                        &&
-                        text.includes('Sektor')
-                    );
-                }
-                """,
-                timeout=60000,
-            )
+        print("Sector inventory loaded.")
 
-            print(
-                "Sector inventory loaded."
-            )
-
-        except Exception:
-
-            print(
-                "Sector inventory did not appear "
-                "within 60 seconds."
-            )
-
-            await page.screenshot(
-                path=str(
-                    ART / "no-sector-inventory.png"
-                ),
-                full_page=True,
-            )
-
-            (ART / "no-sector-inventory.html").write_text(
-                await page.content(),
-                encoding="utf-8",
-            )
-
-            body_debug = await page.locator(
-                "body"
-            ).inner_text()
-
-            (ART / "no-sector-inventory.txt").write_text(
-                body_debug,
-                encoding="utf-8",
-            )
-
-            raise RuntimeError(
-                "Roboticket event loaded, "
-                "but sector inventory did not appear."
-            )
-
-        # Give Angular a small moment to finish the list
         await page.wait_for_timeout(3000)
 
         # -------------------------------------------------
-        # 5. Extract sector inventory
+        # Parse inventory
         # -------------------------------------------------
 
         body_text = await page.locator(
             "body"
         ).inner_text()
 
-        pattern = re.compile(
-            r"Sektor\s+(\d+)"
-            r"[\s\S]{0,100}?"
-            r"Miejsc\s+wolnych\s*(\d+)",
-            re.IGNORECASE,
-        )
-
-        matches = pattern.findall(
+        sectors = parse_sectors(
             body_text
         )
-
-        sectors = []
-
-        seen = set()
-
-        for sector, available in matches:
-
-            key = (
-                sector,
-                int(available),
-            )
-
-            if key not in seen:
-
-                seen.add(key)
-
-                sectors.append(key)
 
         print("")
         print(
@@ -381,27 +376,21 @@ async def main():
                 f"{available} available"
             )
 
+        # Save raw text for diagnostics every run for now.
+        (ART / "page-text.txt").write_text(
+            body_text,
+            encoding="utf-8",
+        )
+
         if not sectors:
 
-            await page.screenshot(
-                path=str(
-                    ART / "sector-regex-failed.png"
-                ),
-                full_page=True,
-            )
-
-            (ART / "sector-page-text.txt").write_text(
-                body_text,
-                encoding="utf-8",
-            )
-
             raise RuntimeError(
-                "Sector inventory appeared, "
+                "Sector inventory is visible, "
                 "but no sector values could be parsed."
             )
 
         # -------------------------------------------------
-        # 6. Store snapshot
+        # Store snapshot
         # -------------------------------------------------
 
         snapshot_id = create_snapshot()
