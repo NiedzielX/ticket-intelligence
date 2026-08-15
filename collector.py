@@ -9,21 +9,21 @@ from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 
 
-EVENT_ID = int(os.getenv("EVENT_ID", "8009"))
-
-EVENT_URL = (
-    f"https://bilety.legia.com/Stadium/Index"
-    f"?eventId={EVENT_ID}"
-)
+EVENT_ID = int(os.environ["EVENT_ID"])
+EVENT_URL = os.environ["ROBOTICKET_URL"]
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
 
-ROBOTICKET_USERNAME = os.environ["ROBOTICKET_USERNAME"]
-ROBOTICKET_PASSWORD = os.environ["ROBOTICKET_PASSWORD"]
+ROBOTICKET_USERNAME = os.getenv("ROBOTICKET_USERNAME")
+ROBOTICKET_PASSWORD = os.getenv("ROBOTICKET_PASSWORD")
 
 SECTOR_INFO_ENDPOINT = "GetWGLSectorsInfo"
 
+
+# ---------------------------------------------------------
+# Supabase
+# ---------------------------------------------------------
 
 def api(path, method="GET", body=None, prefer=None):
 
@@ -115,10 +115,7 @@ def parse_sector_inventory(data):
     return sectors
 
 
-def insert_sector_inventory(
-    snapshot_id,
-    sectors,
-):
+def insert_sector_inventory(snapshot_id, sectors):
 
     rows = [
         {
@@ -127,8 +124,7 @@ def insert_sector_inventory(
             "sector": sector_id,
             "available": available,
         }
-        for sector_id, available
-        in sectors
+        for sector_id, available in sectors
     ]
 
     api(
@@ -139,6 +135,101 @@ def insert_sector_inventory(
 
     return len(rows)
 
+
+# ---------------------------------------------------------
+# Optional Legia authentication
+# ---------------------------------------------------------
+
+async def login_if_required(page):
+
+    if "konto.legia.com" not in page.url:
+        print("Authentication not required.")
+        return
+
+    if not ROBOTICKET_USERNAME or not ROBOTICKET_PASSWORD:
+        raise RuntimeError(
+            "Authentication required but Roboticket credentials "
+            "were not provided."
+        )
+
+    print("Authentication required.")
+
+    email = page.locator(
+        'input[formcontrolname="email"]:visible, '
+        'input[type="email"]:visible'
+    ).first
+
+    password = page.locator(
+        'input[formcontrolname="password"]:visible, '
+        'input[type="password"]:visible'
+    ).first
+
+    await email.wait_for(
+        state="visible",
+        timeout=30000,
+    )
+
+    await password.wait_for(
+        state="visible",
+        timeout=30000,
+    )
+
+    await email.fill(
+        ROBOTICKET_USERNAME
+    )
+
+    await password.fill(
+        ROBOTICKET_PASSWORD
+    )
+
+    submit = page.get_by_role(
+        "button",
+        name="Zaloguj się",
+        exact=False,
+    ).first
+
+    await submit.wait_for(
+        state="visible",
+        timeout=30000,
+    )
+
+    await page.wait_for_function(
+        """
+        () => {
+            const button =
+                Array.from(
+                    document.querySelectorAll('button')
+                )
+                .find(
+                    b =>
+                        b.textContent
+                        &&
+                        b.textContent.includes('Zaloguj')
+                );
+
+            return button && !button.disabled;
+        }
+        """,
+        timeout=30000,
+    )
+
+    print("Logging in...")
+
+    await submit.click()
+
+    await page.wait_for_url(
+        lambda url:
+            "bilety.legia.com" in url,
+        timeout=30000,
+    )
+
+    print("Login successful:")
+    print(page.url)
+
+
+# ---------------------------------------------------------
+# Main
+# ---------------------------------------------------------
 
 async def main():
 
@@ -166,7 +257,7 @@ async def main():
         page = await context.new_page()
 
         # -------------------------------------------------
-        # Capture actual Roboticket sector API
+        # Capture GetWGLSectorsInfo
         # -------------------------------------------------
 
         async def handle_response(response):
@@ -183,9 +274,15 @@ async def main():
 
             sector_data = data
 
+            endpoint = (
+                urlparse(response.url)
+                .path
+                .rsplit("/", 1)[-1]
+            )
+
             print(
                 f"Captured {response.status}: "
-                f"{urlparse(response.url).path.rsplit('/', 1)[-1]}"
+                f"{endpoint}"
             )
 
         page.on(
@@ -221,96 +318,16 @@ async def main():
         await page.wait_for_timeout(2000)
 
         # -------------------------------------------------
-        # Login
+        # Optional authentication
         # -------------------------------------------------
 
-        if "konto.legia.com" in page.url:
+        await login_if_required(page)
 
-            print(
-                "Authentication required."
-            )
+        # If authentication redirected somewhere else,
+        # return to exact requested event.
+        if EVENT_URL not in page.url:
 
-            email = page.locator(
-                'input[formcontrolname="email"]:visible, '
-                'input[type="email"]:visible'
-            ).first
-
-            password = page.locator(
-                'input[formcontrolname="password"]:visible, '
-                'input[type="password"]:visible'
-            ).first
-
-            await email.wait_for(
-                state="visible",
-                timeout=30000,
-            )
-
-            await password.wait_for(
-                state="visible",
-                timeout=30000,
-            )
-
-            await email.fill(
-                ROBOTICKET_USERNAME
-            )
-
-            await password.fill(
-                ROBOTICKET_PASSWORD
-            )
-
-            submit = page.get_by_role(
-                "button",
-                name="Zaloguj się",
-                exact=False,
-            ).first
-
-            await submit.wait_for(
-                state="visible",
-                timeout=30000,
-            )
-
-            await page.wait_for_function(
-                """
-                () => {
-                    const button =
-                        Array.from(
-                            document.querySelectorAll('button')
-                        )
-                        .find(
-                            b =>
-                                b.textContent
-                                &&
-                                b.textContent.includes('Zaloguj')
-                        );
-
-                    return button && !button.disabled;
-                }
-                """,
-                timeout=30000,
-            )
-
-            print("Logging in...")
-
-            await submit.click()
-
-            await page.wait_for_url(
-                lambda url:
-                    "bilety.legia.com" in url,
-                timeout=30000,
-            )
-
-            print("Login successful:")
-            print(page.url)
-
-        # -------------------------------------------------
-        # Ensure exact event
-        # -------------------------------------------------
-
-        if (
-            "bilety.legia.com" not in page.url
-            or
-            f"eventId={EVENT_ID}" not in page.url
-        ):
+            print("Opening exact event page...")
 
             await page.goto(
                 EVENT_URL,
@@ -322,14 +339,14 @@ async def main():
         print(page.url)
 
         # -------------------------------------------------
-        # Wait for sector API
+        # Wait for Roboticket API
         # -------------------------------------------------
 
         print(
             "Waiting for GetWGLSectorsInfo..."
         )
 
-        for second in range(1, 31):
+        for _ in range(30):
 
             if sector_data is not None:
                 break
@@ -343,7 +360,7 @@ async def main():
             )
 
         # -------------------------------------------------
-        # Parse actual API payload
+        # Parse
         # -------------------------------------------------
 
         sectors = parse_sector_inventory(
