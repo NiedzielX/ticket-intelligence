@@ -1,0 +1,47 @@
+name: Lech Demand Study v1.3
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  study:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy requests scikit-learn joblib
+
+      - name: Rebuild clean historical dataset
+        run: python build_lech_demand_dataset_v11.py
+
+      - name: Rebuild enriched v1.2 dataset
+        run: python build_lech_demand_enrichment_v12_fix2.py
+
+      - name: Run table importance and compact weather study
+        run: python run_lech_demand_study_v13.py
+
+      - name: Upload v1.3 study artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lech-demand-study-v1-3
+          path: lech_demand_artifacts_v13/
+          retention-days: 30
