@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
 
-import asyncio
+import io
 import json
 import os
 import re
+import time
+import unicodedata
 from collections import defaultdict, deque
 from datetime import datetime
-from pathlib import Path
 from urllib import parse, request
 
 import pandas as pd
-from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
+import requests
 
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
 CLUB = "Lech Poznań"
 
-# We intentionally start with 2017/18.
-# This avoids old league-format/points-halving complications and gives us
-# a more comparable modern demand era.
 SEASONS = [
     "2017/2018",
     "2018/2019",
@@ -37,51 +34,64 @@ SEASONS = [
 ART = Path("model_artifacts_v03")
 ART.mkdir(exist_ok=True)
 
-ALIASES = {
-    "Górnik Z.": "Górnik Zabrze",
-    "Lechia": "Lechia Gdańsk",
-    "Pogoń": "Pogoń Szczecin",
-    "Jagiellonia": "Jagiellonia Białystok",
-    "Śląsk": "Śląsk Wrocław",
-    "Motor": "Motor Lublin",
-    "Radomiak": "Radomiak Radom",
-    "Legia": "Legia Warszawa",
-    "GKS K.": "GKS Katowice",
-    "Widzew": "Widzew Łódź",
-    "Raków": "Raków Częstochowa",
-    "Zagłębie L.": "Zagłębie Lubin",
-    "Stal M.": "FKS Stal Mielec",
-    "Korona": "Korona Kielce",
-    "Cracovia": "KS Cracovia",
-    "Puszcza": "Puszcza Niepołomice",
-    "Piast": "Piast Gliwice",
-    "Arka": "Arka Gdynia",
-    "Wisła Pł.": "Wisła Płock",
-    "Termalica": "Bruk-Bet Termalica Nieciecza",
-    "Ruch": "Ruch Chorzów",
-    "ŁKS": "ŁKS Łódź",
-    "Wisła K.": "Wisła Kraków",
-    "Podbeskidzie": "Podbeskidzie Bielsko-Biała",
-}
 
-TEAM_CANON = {
-    "Cracovia": "KS Cracovia",
-    "Stal Mielec": "FKS Stal Mielec",
-    "Termalica Nieciecza": "Bruk-Bet Termalica Nieciecza",
-    "Bruk-Bet Termalica": "Bruk-Bet Termalica Nieciecza",
-}
+# ---------------------------------------------------------
+# Team normalization
+# ---------------------------------------------------------
+
+def simplify(value):
+    value = unicodedata.normalize("NFKD", str(value))
+    value = "".join(c for c in value if not unicodedata.combining(c))
+    value = value.lower()
+    value = value.replace("ł", "l")
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
 
 
-def canon_team(name):
-    name = re.sub(r"\s+\([A-Z]+\)$", "", str(name)).strip()
-    name = re.sub(r"\s+", " ", name)
-    return TEAM_CANON.get(name, name)
+def team_key(name):
+    n = simplify(name)
+
+    rules = [
+        (["lech poznan", "lech"], "lech"),
+        (["legia"], "legia"),
+        (["rakow"], "rakow"),
+        (["jagiellonia"], "jagiellonia"),
+        (["pogon"], "pogon"),
+        (["gornik zabrze", "gornik z"], "gornik_zabrze"),
+        (["lechia"], "lechia"),
+        (["slask"], "slask"),
+        (["motor"], "motor"),
+        (["radomiak"], "radomiak"),
+        (["gks katowice", "katowice"], "gks_katowice"),
+        (["widzew"], "widzew"),
+        (["zaglebie"], "zaglebie_lubin"),
+        (["stal mielec", "stal m"], "stal_mielec"),
+        (["korona"], "korona"),
+        (["cracovia"], "cracovia"),
+        (["puszcza", "niepolomice"], "puszcza"),
+        (["piast"], "piast"),
+        (["arka"], "arka"),
+        (["wisla plock", "wisla p"], "wisla_plock"),
+        (["termalica", "nieciecza"], "termalica"),
+        (["ruch"], "ruch"),
+        (["lks"], "lks"),
+        (["wisla krakow", "wisla k"], "wisla_krakow"),
+        (["podbeskidzie"], "podbeskidzie"),
+        (["warta"], "warta"),
+        (["miedz"], "miedz"),
+        (["sandecja", "nowy sacz"], "sandecja"),
+    ]
+
+    for needles, key in rules:
+        if any(x in n for x in needles):
+            return key
+
+    return n.replace(" ", "_")
 
 
-def season_slug(season):
-    a, b = season.split("/")
-    return f"{a}-{b}"
-
+# ---------------------------------------------------------
+# Supabase
+# ---------------------------------------------------------
 
 def api_headers(json_body=False):
     h = {
@@ -97,6 +107,7 @@ def supabase_get(table, params):
     query = parse.urlencode(params, doseq=True, safe=",.*()")
     url = f"{SUPABASE_URL}/rest/v1/{table}?{query}"
     req = request.Request(url, headers=api_headers(), method="GET")
+
     with request.urlopen(req, timeout=60) as response:
         return json.loads(response.read().decode("utf-8"))
 
@@ -111,8 +122,9 @@ def supabase_upsert(table, rows, on_conflict):
     )
 
     for i in range(0, len(rows), 100):
-        batch = rows[i:i+100]
+        batch = rows[i:i + 100]
         body = json.dumps(batch, ensure_ascii=False).encode("utf-8")
+
         headers = api_headers(json_body=True)
         headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
 
@@ -122,6 +134,7 @@ def supabase_upsert(table, rows, on_conflict):
             headers=headers,
             method="POST",
         )
+
         with request.urlopen(req, timeout=60) as response:
             response.read()
 
@@ -148,176 +161,347 @@ def load_attendance():
         .dt.tz_convert("Europe/Warsaw")
         .dt.date
     )
-    df["canonical_opponent"] = df["opponent"].map(
-        lambda x: ALIASES.get(x, x)
-    )
+    df["opponent_key"] = df["opponent"].map(team_key)
+
     return df
 
 
-async def fetch_html(page, url):
-    print(f"Fetching {url}")
-    response = await page.goto(
-        url,
-        wait_until="domcontentloaded",
-        timeout=60000,
+# ---------------------------------------------------------
+# FBref
+# ---------------------------------------------------------
+
+SESSION = requests.Session()
+SESSION.headers.update(
+    {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+)
+
+
+def fbref_url(season):
+    season_slug = season.replace("/", "-")
+    return (
+        "https://fbref.com/en/comps/36/"
+        f"{season_slug}/schedule/"
+        f"{season_slug}-Ekstraklasa-Scores-and-Fixtures"
     )
-    if response and response.status >= 400:
-        raise RuntimeError(f"HTTP {response.status}: {url}")
-    await page.wait_for_timeout(500)
-    return await page.content()
 
 
-def parse_schedule(html, season, url):
-    soup = BeautifulSoup(html, "html.parser")
-    matches = []
-    current_round = None
-    current_date = None
+def download_fbref(season):
+    url = fbref_url(season)
 
-    for table in soup.select("table.standard_tabelle"):
-        for tr in table.select("tr"):
-            ths = [
-                x.get_text(" ", strip=True)
-                for x in tr.find_all("th")
-            ]
+    # Sports Reference rate-limits aggressive traffic.
+    # We perform only one request per season and wait between seasons.
+    for attempt in range(3):
+        response = SESSION.get(url, timeout=60)
 
-            if ths:
-                joined = " ".join(ths)
-                m = re.search(
-                    r"(\d+)\.\s*(?:Round|Spieltag)",
-                    joined,
-                    re.I,
-                )
-                if m:
-                    current_round = int(m.group(1))
-                continue
+        if response.status_code == 200:
+            return response.text, url
 
-            cells = [
-                td.get_text(" ", strip=True)
-                for td in tr.find_all("td")
-            ]
-            if len(cells) < 5:
-                continue
-
-            # Find date if present in any early cell.
-            row_date = None
-            row_time = None
-
-            for cell in cells[:3]:
-                dm = re.search(
-                    r"(\d{2})/(\d{2})/(\d{4})",
-                    cell,
-                )
-                if dm:
-                    row_date = datetime(
-                        int(dm.group(3)),
-                        int(dm.group(2)),
-                        int(dm.group(1)),
-                    ).date()
-
-                tm = re.search(
-                    r"\b(\d{1,2}):(\d{2})\b",
-                    cell,
-                )
-                if tm:
-                    row_time = (
-                        int(tm.group(1)),
-                        int(tm.group(2)),
-                    )
-
-            if row_date:
-                current_date = row_date
-            if not current_date:
-                continue
-
-            # Team cells are the two textual cells around the separator '-'.
-            # WorldFootball schedule rows generally look like:
-            # date | time | home | - | away | score
-            dash_positions = [
-                i for i, c in enumerate(cells)
-                if c.strip() == "-"
-            ]
-            if not dash_positions:
-                continue
-
-            dash = dash_positions[0]
-            if dash < 1 or dash + 1 >= len(cells):
-                continue
-
-            home = canon_team(cells[dash - 1])
-            away = canon_team(cells[dash + 1])
-
-            if not home or not away:
-                continue
-
-            # Score must be read only from cells AFTER the away team.
-            # This prevents a kickoff such as 17:30 from being mistaken
-            # for a 17-30 match result.
-            score_match = None
-            for cell in cells[dash + 2:]:
-                sm = re.match(
-                    r"^\s*(\d+):(\d+)(?:\s|\(|$)",
-                    cell,
-                )
-                if sm:
-                    score_match = sm
-                    break
-
-            if not score_match:
-                continue
-
-            hg = int(score_match.group(1))
-            ag = int(score_match.group(2))
-
-            hour, minute = row_time or (12, 0)
-
-            # The site timezone can differ from Poland by an hour.
-            # Relative ordering is what matters here.
-            kickoff = pd.Timestamp(
-                datetime.combine(
-                    current_date,
-                    datetime.min.time(),
-                )
-            ).tz_localize("Europe/Warsaw")
-            kickoff += pd.Timedelta(
-                hours=hour,
-                minutes=minute,
+        if response.status_code in (429, 500, 502, 503, 504):
+            wait = 20 * (attempt + 1)
+            print(
+                f"FBref {season}: HTTP {response.status_code}; "
+                f"retrying in {wait}s"
             )
+            time.sleep(wait)
+            continue
 
-            matches.append(
-                {
-                    "season": season,
-                    "round_no": current_round,
-                    "kickoff": kickoff,
-                    "date": current_date,
-                    "home": home,
-                    "away": away,
-                    "home_goals": hg,
-                    "away_goals": ag,
-                    "source_url": url,
-                }
-            )
-
-    # Deduplicate exact matches in case multiple tables were parsed.
-    unique = {}
-    for m in matches:
-        key = (
-            m["season"],
-            m["date"],
-            m["home"],
-            m["away"],
+        print(
+            f"FBref direct request failed for {season}: "
+            f"HTTP {response.status_code}"
         )
-        unique[key] = m
+        break
 
-    return list(unique.values())
+    # Fallback through Jina Reader. It fetches the public page and returns
+    # readable Markdown, which avoids depending on WorldFootball.
+    reader_url = (
+        "https://r.jina.ai/http://fbref.com/en/comps/36/"
+        f"{season.replace('/', '-')}/schedule/"
+        f"{season.replace('/', '-')}-Ekstraklasa-Scores-and-Fixtures"
+    )
 
+    response = requests.get(
+        reader_url,
+        timeout=90,
+        headers={
+            "User-Agent": "ticket-intelligence/0.3",
+        },
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"FBref failed ({url}) and Jina fallback failed "
+            f"with HTTP {response.status_code}"
+        )
+
+    return response.text, reader_url
+
+
+def normalize_columns(df):
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [
+            " ".join(
+                str(x)
+                for x in col
+                if str(x) != "nan"
+            ).strip()
+            for col in df.columns
+        ]
+
+    df.columns = [
+        re.sub(r"\s+", " ", str(c)).strip()
+        for c in df.columns
+    ]
+
+    return df
+
+
+def choose_column(columns, exact):
+    for c in columns:
+        if c.lower() == exact.lower():
+            return c
+
+    for c in columns:
+        if exact.lower() in c.lower():
+            return c
+
+    return None
+
+
+def parse_score(score):
+    if score is None or pd.isna(score):
+        return None
+
+    text = str(score).strip()
+
+    # FBref normally uses an en dash: 2–1
+    m = re.search(r"(\d+)\s*[–—-]\s*(\d+)", text)
+
+    if not m:
+        return None
+
+    return int(m.group(1)), int(m.group(2))
+
+
+def parse_html_schedule(content, season, source_url):
+    try:
+        tables = pd.read_html(io.StringIO(content))
+    except ValueError:
+        return None
+
+    schedule = None
+
+    for table in tables:
+        table = normalize_columns(table)
+
+        cols = list(table.columns)
+        date_col = choose_column(cols, "Date")
+        home_col = choose_column(cols, "Home")
+        away_col = choose_column(cols, "Away")
+        score_col = choose_column(cols, "Score")
+
+        if date_col and home_col and away_col and score_col:
+            schedule = table
+            break
+
+    if schedule is None:
+        return None
+
+    return dataframe_to_matches(schedule, season, source_url)
+
+
+def parse_markdown_schedule(content, season, source_url):
+    lines = content.splitlines()
+
+    for i, line in enumerate(lines):
+        if (
+            "|" in line
+            and "Date" in line
+            and "Home" in line
+            and "Score" in line
+            and "Away" in line
+        ):
+            header = [x.strip() for x in line.strip().strip("|").split("|")]
+
+            rows = []
+            j = i + 1
+
+            # Skip markdown separator.
+            if j < len(lines) and re.match(r"^\s*\|?[\s:|-]+\|", lines[j]):
+                j += 1
+
+            while j < len(lines):
+                row_line = lines[j]
+
+                if "|" not in row_line:
+                    if rows:
+                        break
+                    j += 1
+                    continue
+
+                cells = [
+                    x.strip()
+                    for x in row_line.strip().strip("|").split("|")
+                ]
+
+                if len(cells) == len(header):
+                    rows.append(cells)
+
+                j += 1
+
+            if rows:
+                return dataframe_to_matches(
+                    pd.DataFrame(rows, columns=header),
+                    season,
+                    source_url,
+                )
+
+    return None
+
+
+def dataframe_to_matches(df, season, source_url):
+    df = normalize_columns(df)
+    cols = list(df.columns)
+
+    date_col = choose_column(cols, "Date")
+    time_col = choose_column(cols, "Time")
+    home_col = choose_column(cols, "Home")
+    away_col = choose_column(cols, "Away")
+    score_col = choose_column(cols, "Score")
+    wk_col = choose_column(cols, "Wk")
+
+    if not all([date_col, home_col, away_col, score_col]):
+        return None
+
+    all_fixtures = []
+    completed = []
+
+    for _, row in df.iterrows():
+        date_value = str(row.get(date_col, "")).strip()
+
+        try:
+            date = pd.to_datetime(
+                date_value,
+                errors="raise",
+            ).date()
+        except Exception:
+            continue
+
+        home = str(row.get(home_col, "")).strip()
+        away = str(row.get(away_col, "")).strip()
+
+        if not home or not away or home == "nan" or away == "nan":
+            continue
+
+        hour = 12
+        minute = 0
+
+        if time_col:
+            tm = re.search(
+                r"(\d{1,2}):(\d{2})",
+                str(row.get(time_col, "")),
+            )
+            if tm:
+                hour = int(tm.group(1))
+                minute = int(tm.group(2))
+
+        kickoff = pd.Timestamp(
+            datetime(
+                date.year,
+                date.month,
+                date.day,
+                hour,
+                minute,
+            ),
+            tz="Europe/Warsaw",
+        )
+
+        wk = None
+        if wk_col:
+            wk_match = re.search(
+                r"\d+",
+                str(row.get(wk_col, "")),
+            )
+            if wk_match:
+                wk = int(wk_match.group(0))
+
+        base = {
+            "season": season,
+            "round_no": wk,
+            "kickoff": kickoff,
+            "date": date,
+            "home": home,
+            "away": away,
+            "home_key": team_key(home),
+            "away_key": team_key(away),
+            "source_url": source_url,
+        }
+
+        all_fixtures.append(base)
+
+        score = parse_score(row.get(score_col))
+        if score is None:
+            continue
+
+        completed.append(
+            {
+                **base,
+                "home_goals": score[0],
+                "away_goals": score[1],
+            }
+        )
+
+    if not all_fixtures:
+        return None
+
+    return {
+        "all_fixtures": all_fixtures,
+        "completed": completed,
+    }
+
+
+def fetch_season(season):
+    content, source_url = download_fbref(season)
+
+    parsed = parse_html_schedule(
+        content,
+        season,
+        source_url,
+    )
+
+    if parsed is None:
+        parsed = parse_markdown_schedule(
+            content,
+            season,
+            source_url,
+        )
+
+    if parsed is None:
+        raise RuntimeError(
+            f"Could not parse FBref schedule for {season}"
+        )
+
+    return parsed
+
+
+# ---------------------------------------------------------
+# Sporting context
+# ---------------------------------------------------------
 
 def position_map(stats):
     rows = []
-    for team, s in stats.items():
+
+    for key, s in stats.items():
         gd = s["gf"] - s["ga"]
         rows.append(
             (
-                team,
+                key,
                 s["pts"],
                 gd,
                 s["gf"],
@@ -329,33 +513,32 @@ def position_map(stats):
     )
 
     positions = {}
-    last_key = None
-    last_rank = 0
 
-    for i, (team, pts, gd, gf) in enumerate(rows, 1):
-        key = (pts, gd, gf)
-        if key != last_key:
-            last_rank = i
-            last_key = key
-        positions[team] = last_rank
+    for i, (key, _, _, _) in enumerate(rows, 1):
+        positions[key] = i
 
     return positions
 
 
-def recent_metrics(history, team):
-    games = list(history[team])[-5:]
-    points = sum(g["points"] for g in games)
-    goal_diff = sum(g["gd"] for g in games)
-    return points, goal_diff
+def recent_metrics(history, key):
+    games = list(history[key])[-5:]
+
+    return (
+        sum(g["points"] for g in games),
+        sum(g["gd"] for g in games),
+    )
 
 
-def create_context_for_season(matches):
-    if not matches:
+def create_context_for_season(parsed):
+    completed = parsed["completed"]
+    all_fixtures = parsed["all_fixtures"]
+
+    if not completed:
         return []
 
     teams = sorted(
-        set(m["home"] for m in matches)
-        | set(m["away"] for m in matches)
+        set(m["home_key"] for m in all_fixtures)
+        | set(m["away_key"] for m in all_fixtures)
     )
 
     stats = {
@@ -367,79 +550,81 @@ def create_context_for_season(matches):
         }
         for t in teams
     }
+
     history = defaultdict(lambda: deque(maxlen=5))
 
-    total_rounds = max(
-        [m["round_no"] or 0 for m in matches]
-        or [0]
+    lech_total_matches = sum(
+        1
+        for m in all_fixtures
+        if "lech" in (m["home_key"], m["away_key"])
     )
 
-    # If round labels could not be parsed, use max scheduled games/team.
-    scheduled_by_team = defaultdict(int)
-    for m in matches:
-        scheduled_by_team[m["home"]] += 1
-        scheduled_by_team[m["away"]] += 1
-
-    if not total_rounds:
-        total_rounds = max(scheduled_by_team.values())
-
-    results = []
-
-    # Simultaneous matches must all see the same pre-kickoff table.
     groups = defaultdict(list)
-    for m in matches:
+
+    for m in completed:
         groups[m["kickoff"]].append(m)
+
+    contexts = []
 
     for kickoff in sorted(groups):
         group = groups[kickoff]
+
         positions = position_map(stats)
-        leader_pts = max((x["pts"] for x in stats.values()), default=0)
+        leader_points = max(
+            (s["pts"] for s in stats.values()),
+            default=0,
+        )
 
         for m in group:
-            if m["home"] != CLUB and m["away"] != CLUB:
+            if "lech" not in (m["home_key"], m["away_key"]):
                 continue
 
-            opponent = m["away"] if m["home"] == CLUB else m["home"]
+            opponent_key = (
+                m["away_key"]
+                if m["home_key"] == "lech"
+                else m["home_key"]
+            )
 
-            lech = stats[CLUB]
-            opp = stats[opponent]
+            lech = stats["lech"]
+            opp = stats[opponent_key]
 
-            lech_l5_pts, lech_l5_gd = recent_metrics(history, CLUB)
-            opp_l5_pts, opp_l5_gd = recent_metrics(history, opponent)
+            lech_l5_pts, lech_l5_gd = recent_metrics(
+                history,
+                "lech",
+            )
+            opp_l5_pts, opp_l5_gd = recent_metrics(
+                history,
+                opponent_key,
+            )
 
-            round_no = m["round_no"]
-            if round_no is None:
-                round_no = max(
-                    lech["played"],
-                    opp["played"],
-                ) + 1
-
-            results.append(
+            contexts.append(
                 {
                     "season": m["season"],
                     "date": m["date"],
-                    "opponent": opponent,
-                    "round_no": int(round_no),
-                    "total_rounds": int(total_rounds),
+                    "opponent_key": opponent_key,
+                    "round_no": lech["played"] + 1,
+                    "total_rounds": lech_total_matches,
                     "matches_remaining": max(
-                        int(total_rounds - lech["played"]),
+                        lech_total_matches - lech["played"],
                         0,
                     ),
                     "season_progress": round(
                         lech["played"]
-                        / max(total_rounds, 1),
+                        / max(lech_total_matches, 1),
                         4,
                     ),
-                    "lech_position_before": positions.get(CLUB),
-                    "opponent_position_before": positions.get(opponent),
+                    "lech_position_before": positions["lech"],
+                    "opponent_position_before": positions[opponent_key],
                     "position_gap": (
-                        positions.get(opponent, 0)
-                        - positions.get(CLUB, 0)
+                        positions[opponent_key]
+                        - positions["lech"]
                     ),
                     "lech_points_before": lech["pts"],
                     "opponent_points_before": opp["pts"],
                     "points_gap": lech["pts"] - opp["pts"],
-                    "points_to_leader": leader_pts - lech["pts"],
+                    "points_to_leader": (
+                        leader_points - lech["pts"]
+                    ),
                     "lech_matches_played_before": lech["played"],
                     "opponent_matches_played_before": opp["played"],
                     "lech_ppg_before": round(
@@ -458,7 +643,7 @@ def create_context_for_season(matches):
                 }
             )
 
-        # Now update standings after all simultaneous fixtures in the group.
+        # Update all matches only AFTER their pre-match context was captured.
         for m in group:
             hg = m["home_goals"]
             ag = m["away_goals"]
@@ -466,8 +651,8 @@ def create_context_for_season(matches):
             home_pts = 3 if hg > ag else 1 if hg == ag else 0
             away_pts = 3 if ag > hg else 1 if hg == ag else 0
 
-            hs = stats[m["home"]]
-            aws = stats[m["away"]]
+            hs = stats[m["home_key"]]
+            aws = stats[m["away_key"]]
 
             hs["played"] += 1
             hs["pts"] += home_pts
@@ -479,20 +664,21 @@ def create_context_for_season(matches):
             aws["gf"] += ag
             aws["ga"] += hg
 
-            history[m["home"]].append(
+            history[m["home_key"]].append(
                 {
                     "points": home_pts,
                     "gd": hg - ag,
                 }
             )
-            history[m["away"]].append(
+
+            history[m["away_key"]].append(
                 {
                     "points": away_pts,
                     "gd": ag - hg,
                 }
             )
 
-    return results
+    return contexts
 
 
 def match_context_to_attendance(attendance, contexts):
@@ -503,13 +689,11 @@ def match_context_to_attendance(attendance, contexts):
         if row["season"] not in SEASONS:
             continue
 
-        expected_opp = row["canonical_opponent"]
-
         candidates = [
             c
             for c in contexts
             if c["season"] == row["season"]
-            and c["opponent"] == expected_opp
+            and c["opponent_key"] == row["opponent_key"]
             and abs(
                 (
                     pd.Timestamp(c["date"])
@@ -525,7 +709,7 @@ def match_context_to_attendance(attendance, contexts):
                     "season": row["season"],
                     "match_date": row["match_date"].isoformat(),
                     "opponent": row["opponent"],
-                    "canonical_opponent": expected_opp,
+                    "opponent_key": row["opponent_key"],
                     "candidate_count": len(candidates),
                 }
             )
@@ -539,26 +723,36 @@ def match_context_to_attendance(attendance, contexts):
                 "season": row["season"],
                 "match_date": row["match_date"].isoformat(),
                 "opponent": row["opponent"],
+
                 "round_no": c["round_no"],
                 "total_rounds": c["total_rounds"],
                 "matches_remaining": c["matches_remaining"],
                 "season_progress": c["season_progress"],
+
                 "lech_position_before": c["lech_position_before"],
                 "opponent_position_before": c["opponent_position_before"],
                 "position_gap": c["position_gap"],
+
                 "lech_points_before": c["lech_points_before"],
                 "opponent_points_before": c["opponent_points_before"],
                 "points_gap": c["points_gap"],
                 "points_to_leader": c["points_to_leader"],
+
                 "lech_matches_played_before": c["lech_matches_played_before"],
-                "opponent_matches_played_before": c["opponent_matches_played_before"],
+                "opponent_matches_played_before": c[
+                    "opponent_matches_played_before"
+                ],
                 "lech_ppg_before": c["lech_ppg_before"],
                 "opponent_ppg_before": c["opponent_ppg_before"],
+
                 "lech_last5_points": c["lech_last5_points"],
                 "opponent_last5_points": c["opponent_last5_points"],
                 "lech_last5_goal_diff": c["lech_last5_goal_diff"],
-                "opponent_last5_goal_diff": c["opponent_last5_goal_diff"],
-                "source": "worldfootball.net",
+                "opponent_last5_goal_diff": c[
+                    "opponent_last5_goal_diff"
+                ],
+
+                "source": "fbref.com",
                 "source_url": c["source_url"],
             }
         )
@@ -566,89 +760,63 @@ def match_context_to_attendance(attendance, contexts):
     return matched, unmatched
 
 
-async def main():
+def main():
     attendance = load_attendance()
 
     all_contexts = []
-    scrape_summary = []
+    summary = []
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) "
-                "AppleWebKit/537.36 Chrome/124 Safari/537.36"
+    for idx, season in enumerate(SEASONS):
+        print(f"Fetching FBref Ekstraklasa {season}...")
+
+        try:
+            parsed = fetch_season(season)
+
+            contexts = create_context_for_season(parsed)
+            all_contexts.extend(contexts)
+
+            print(
+                f"{season}: "
+                f"{len(parsed['all_fixtures'])} fixtures, "
+                f"{len(parsed['completed'])} completed, "
+                f"{len(contexts)} Lech contexts"
             )
-        )
-        page = await context.new_page()
 
-        for season in SEASONS:
-            slug = season_slug(season)
-            url = (
-                "https://www.worldfootball.net/all_matches/"
-                f"pol-ekstraklasa-{slug}/"
+            summary.append(
+                {
+                    "season": season,
+                    "fixtures": len(parsed["all_fixtures"]),
+                    "completed": len(parsed["completed"]),
+                    "lech_contexts": len(contexts),
+                    "status": "ok",
+                }
             )
 
-            try:
-                html = await fetch_html(page, url)
-                matches = parse_schedule(html, season, url)
+        except Exception as exc:
+            print(f"WARNING {season}: {exc}")
 
-                if not matches:
-                    print(f"WARNING: no completed matches parsed for {season}")
-                    scrape_summary.append(
-                        {
-                            "season": season,
-                            "matches": 0,
-                            "lech_contexts": 0,
-                            "status": "no_matches",
-                        }
-                    )
-                    continue
+            summary.append(
+                {
+                    "season": season,
+                    "fixtures": 0,
+                    "completed": 0,
+                    "lech_contexts": 0,
+                    "status": f"error: {exc}",
+                }
+            )
 
-                contexts = create_context_for_season(matches)
-                all_contexts.extend(contexts)
-
-                print(
-                    f"{season}: {len(matches)} league results, "
-                    f"{len(contexts)} Lech contexts"
-                )
-
-                scrape_summary.append(
-                    {
-                        "season": season,
-                        "matches": len(matches),
-                        "lech_contexts": len(contexts),
-                        "status": "ok",
-                    }
-                )
-
-            except Exception as exc:
-                print(f"WARNING {season}: {exc}")
-                scrape_summary.append(
-                    {
-                        "season": season,
-                        "matches": 0,
-                        "lech_contexts": 0,
-                        "status": f"error: {exc}",
-                    }
-                )
-
-        await browser.close()
+        # Stay comfortably below aggressive request rates.
+        if idx < len(SEASONS) - 1:
+            time.sleep(5)
 
     matched, unmatched = match_context_to_attendance(
         attendance,
         all_contexts,
     )
 
-    if not matched:
-        raise RuntimeError(
-            "No historical attendance rows matched sporting context."
-        )
-
-    supabase_upsert(
-        "historical_match_context",
-        matched,
-        "historical_match_id",
+    pd.DataFrame(summary).to_csv(
+        ART / "scrape_summary.csv",
+        index=False,
     )
 
     pd.DataFrame(matched).to_csv(
@@ -661,11 +829,6 @@ async def main():
         index=False,
     )
 
-    pd.DataFrame(scrape_summary).to_csv(
-        ART / "scrape_summary.csv",
-        index=False,
-    )
-
     print("")
     print("=" * 72)
     print("HISTORICAL CONTEXT BUILD")
@@ -673,16 +836,21 @@ async def main():
     print(f"Unmatched: {len(unmatched)}")
     print("=" * 72)
 
-    # We allow a handful of unmatched rows due postponed/name edge cases,
-    # but a large gap means we should not train.
     if len(matched) < 100:
         raise RuntimeError(
             f"Only {len(matched)} rows matched. "
-            "Do not train v0.3 until source parsing is fixed."
+            "Artifact was uploaded for diagnosis; "
+            "do not train v0.3 yet."
         )
+
+    supabase_upsert(
+        "historical_match_context",
+        matched,
+        "historical_match_id",
+    )
 
     print("SUCCESS")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
