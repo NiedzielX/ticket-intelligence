@@ -14,7 +14,7 @@ from urllib import parse, request
 import pandas as pd
 import requests
 
-SCRIPT_VERSION = "v03-fbref-fix3"
+SCRIPT_VERSION = "v03-fbref-fix4"
 print(f"Historical context builder: {SCRIPT_VERSION}")
 
 
@@ -296,7 +296,10 @@ def parse_score(score):
 def parse_html_schedule(content, season, source_url):
     try:
         tables = pd.read_html(io.StringIO(content))
-    except ValueError:
+    except (ValueError, ImportError):
+        return None
+    except Exception as exc:
+        print(f"HTML table parse skipped for {season}: {exc}")
         return None
 
     schedule = None
