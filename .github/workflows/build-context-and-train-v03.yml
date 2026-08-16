@@ -1,0 +1,44 @@
+name: Build context and train Model A v0.3
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install pandas numpy requests beautifulsoup4 playwright scikit-learn joblib
+          playwright install chromium
+
+      - name: Build historical sporting context
+        run: python build_historical_context_v03.py
+
+      - name: Train Model A v0.3
+        run: python train_attendance_model_v03.py
+
+      - name: Upload audit and model results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-model-v03
+          path: model_artifacts_v03/
+          retention-days: 30
