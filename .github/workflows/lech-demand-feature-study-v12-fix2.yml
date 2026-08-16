@@ -1,0 +1,47 @@
+name: Lech Demand Feature Study v1.2 FIX2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  feature-study:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy requests scikit-learn joblib
+
+      - name: Rebuild clean v1.1 dataset
+        run: python build_lech_demand_dataset_v11.py
+
+      - name: Add seasonality, Europe and historical weather
+        run: python build_lech_demand_enrichment_v12_fix2.py
+
+      - name: Run v1.2 ablation study
+        run: python run_lech_demand_feature_study_v12.py
+
+      - name: Upload study artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lech-demand-feature-study-v1-2-fix2
+          path: lech_demand_artifacts_v12/
+          retention-days: 30
