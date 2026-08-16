@@ -1,0 +1,42 @@
+name: Train Lech attendance model v0.2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+
+      MODEL_CLUB: "Lech Poznań"
+      PREDICT_OPPONENT: "Raków Częstochowa"
+      PREDICT_MATCH_DATE: "2026-09-06T17:30:00+02:00"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pandas scikit-learn joblib
+
+      - name: Train and backtest Model A v0.2
+        run: python train_attendance_model_v02.py
+
+      - name: Upload model report
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-model-v02
+          path: model_artifacts_v02/
+          retention-days: 30
