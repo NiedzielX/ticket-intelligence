@@ -8,10 +8,14 @@ import time
 import unicodedata
 from collections import defaultdict, deque
 from datetime import datetime
+from pathlib import Path
 from urllib import parse, request
 
 import pandas as pd
 import requests
+
+SCRIPT_VERSION = "v03-fbref-fix3"
+print(f"Historical context builder: {SCRIPT_VERSION}")
 
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
