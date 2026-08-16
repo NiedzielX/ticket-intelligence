@@ -13,9 +13,6 @@ from urllib import parse, request
 import pandas as pd
 import requests
 
-SCRIPT_VERSION = "v03-fbref-fix2"
-print(f"Historical context builder: {SCRIPT_VERSION}")
-
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
