@@ -1,0 +1,254 @@
+{
+  "script_version": "lech-demand-table-weather-study-v1.3",
+  "dataset_rows": 125,
+  "v12_early_seasonality_raw_holdout_mae": 5321.8,
+  "candidates": [
+    {
+      "candidate": "early_seasonality",
+      "role": "early",
+      "model_rows": 125,
+      "feature_count": 51,
+      "development_mae": 7012.1,
+      "development_bias": -3419.5,
+      "holdout_mae": 5318.5,
+      "holdout_bias": -2337.6,
+      "holdout_interval_coverage_pct": 96.9,
+      "holdout_mean_interval_width": 23607.6,
+      "delta_vs_v12_early_seasonality_raw": -3.3,
+      "per_season": {
+        "2022/2023": {
+          "p50": {
+            "mae": 6664.3,
+            "median_ae": 4894.8,
+            "rmse": 8255.3,
+            "mape_pct": 30.04,
+            "bias": -3689.2
+          },
+          "interval_coverage_pct": 100.0,
+          "mean_interval_width": 39201.2
+        },
+        "2023/2024": {
+          "p50": {
+            "mae": 7339.5,
+            "median_ae": 6626.5,
+            "rmse": 8537.9,
+            "mape_pct": 30.54,
+            "bias": -3165.7
+          },
+          "interval_coverage_pct": 88.2,
+          "mean_interval_width": 24313.1
+        },
+        "2024/2025": {
+          "p50": {
+            "mae": 5071.4,
+            "median_ae": 3781.2,
+            "rmse": 6567.4,
+            "mape_pct": 17.72,
+            "bias": -1850.1
+          },
+          "interval_coverage_pct": 93.8,
+          "mean_interval_width": 21220.0
+        },
+        "2025/2026": {
+          "p50": {
+            "mae": 5565.6,
+            "median_ae": 4913.2,
+            "rmse": 6796.0,
+            "mape_pct": 18.36,
+            "bias": -2825.2
+          },
+          "interval_coverage_pct": 100.0,
+          "mean_interval_width": 25995.3
+        }
+      }
+    },
+    {
+      "candidate": "early_seasonality_table",
+      "role": "early",
+      "model_rows": 125,
+      "feature_count": 71,
+      "development_mae": 7008.6,
+      "development_bias": -3403.9,
+      "holdout_mae": 5495.8,
+      "holdout_bias": -2033.0,
+      "holdout_interval_coverage_pct": 96.9,
+      "holdout_mean_interval_width": 24708.6,
+      "delta_vs_v12_early_seasonality_raw": 174.0,
+      "per_season": {
+        "2022/2023": {
+          "p50": {
+            "mae": 6996.7,
+            "median_ae": 5149.2,
+            "rmse": 8613.6,
+            "mape_pct": 31.43,
+            "bias": -3900.1
+          },
+          "interval_coverage_pct": 100.0,
+          "mean_interval_width": 38819.2
+        },
+        "2023/2024": {
+          "p50": {
+            "mae": 7019.8,
+            "median_ae": 6426.1,
+            "rmse": 8207.4,
+            "mape_pct": 29.26,
+            "bias": -2936.8
+          },
+          "interval_coverage_pct": 94.1,
+          "mean_interval_width": 24224.7
+        },
+        "2024/2025": {
+          "p50": {
+            "mae": 5147.6,
+            "median_ae": 3814.5,
+            "rmse": 6526.9,
+            "mape_pct": 18.32,
+            "bias": -1369.9
+          },
+          "interval_coverage_pct": 93.8,
+          "mean_interval_width": 23045.9
+        },
+        "2025/2026": {
+          "p50": {
+            "mae": 5844.1,
+            "median_ae": 5616.4,
+            "rmse": 7098.5,
+            "mape_pct": 19.84,
+            "bias": -2696.2
+          },
+          "interval_coverage_pct": 100.0,
+          "mean_interval_width": 26371.2
+        }
+      }
+    },
+    {
+      "candidate": "oracle_seasonality_weather_compact",
+      "role": "oracle_weather",
+      "model_rows": 125,
+      "feature_count": 58,
+      "development_mae": 7240.4,
+      "development_bias": -3446.8,
+      "holdout_mae": 5349.9,
+      "holdout_bias": -1428.1,
+      "holdout_interval_coverage_pct": 96.9,
+      "holdout_mean_interval_width": 23162.7,
+      "delta_vs_v12_early_seasonality_raw": 28.1,
+      "per_season": {
+        "2022/2023": {
+          "p50": {
+            "mae": 7667.6,
+            "median_ae": 5392.6,
+            "rmse": 10031.5,
+            "mape_pct": 35.85,
+            "bias": -3594.0
+          },
+          "interval_coverage_pct": 93.8,
+          "mean_interval_width": 34918.0
+        },
+        "2023/2024": {
+          "p50": {
+            "mae": 6838.3,
+            "median_ae": 6588.8,
+            "rmse": 7891.1,
+            "mape_pct": 28.14,
+            "bias": -3308.2
+          },
+          "interval_coverage_pct": 100.0,
+          "mean_interval_width": 28272.6
+        },
+        "2024/2025": {
+          "p50": {
+            "mae": 5263.4,
+            "median_ae": 4566.3,
+            "rmse": 6704.4,
+            "mape_pct": 18.94,
+            "bias": -909.9
+          },
+          "interval_coverage_pct": 93.8,
+          "mean_interval_width": 23232.2
+        },
+        "2025/2026": {
+          "p50": {
+            "mae": 5436.4,
+            "median_ae": 5088.6,
+            "rmse": 6299.4,
+            "mape_pct": 18.15,
+            "bias": -1946.3
+          },
+          "interval_coverage_pct": 100.0,
+          "mean_interval_width": 23093.2
+        }
+      }
+    },
+    {
+      "candidate": "oracle_seasonality_table_weather_compact",
+      "role": "oracle_weather",
+      "model_rows": 125,
+      "feature_count": 78,
+      "development_mae": 7202.3,
+      "development_bias": -3219.2,
+      "holdout_mae": 5399.5,
+      "holdout_bias": -1337.4,
+      "holdout_interval_coverage_pct": 96.9,
+      "holdout_mean_interval_width": 23191.6,
+      "delta_vs_v12_early_seasonality_raw": 77.7,
+      "per_season": {
+        "2022/2023": {
+          "p50": {
+            "mae": 7601.9,
+            "median_ae": 5060.5,
+            "rmse": 9984.6,
+            "mape_pct": 35.51,
+            "bias": -3556.3
+          },
+          "interval_coverage_pct": 93.8,
+          "mean_interval_width": 35241.9
+        },
+        "2023/2024": {
+          "p50": {
+            "mae": 6826.2,
+            "median_ae": 6472.5,
+            "rmse": 7795.1,
+            "mape_pct": 28.5,
+            "bias": -2902.0
+          },
+          "interval_coverage_pct": 100.0,
+          "mean_interval_width": 27553.8
+        },
+        "2024/2025": {
+          "p50": {
+            "mae": 5227.9,
+            "median_ae": 4312.3,
+            "rmse": 6651.0,
+            "mape_pct": 18.92,
+            "bias": -601.4
+          },
+          "interval_coverage_pct": 93.8,
+          "mean_interval_width": 21993.0
+        },
+        "2025/2026": {
+          "p50": {
+            "mae": 5571.1,
+            "median_ae": 4816.6,
+            "rmse": 6496.1,
+            "mape_pct": 18.91,
+            "bias": -2073.5
+          },
+          "interval_coverage_pct": 100.0,
+          "mean_interval_width": 24390.2
+        }
+      }
+    }
+  ],
+  "best_early_candidate": "early_seasonality",
+  "best_overall_candidate": "early_seasonality",
+  "signal_delta_mae": {
+    "table_importance_vs_seasonality": 177.3,
+    "compact_weather_oracle_vs_seasonality": 31.4
+  },
+  "interpretation": {
+    "table_importance": "Negative delta means table-importance features improved the early forecast.",
+    "weather": "Weather remains ORACLE-only. It should be promoted only if signal is stable on both development and holdout seasons.",
+    "uncertainty": "P50 is the model point forecast. Conformal calibration affects only P10/P90 and never shifts P50."
+  }
+}

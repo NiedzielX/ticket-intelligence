@@ -1,0 +1,5 @@
+candidate,role,model_rows,feature_count,development_mae,development_bias,holdout_mae,holdout_bias,holdout_interval_coverage_pct,holdout_mean_interval_width,delta_vs_v12_early_seasonality_raw
+early_seasonality,early,125,51,7012.1,-3419.5,5318.5,-2337.6,96.9,23607.6,-3.3
+oracle_seasonality_weather_compact,oracle_weather,125,58,7240.4,-3446.8,5349.9,-1428.1,96.9,23162.7,28.1
+oracle_seasonality_table_weather_compact,oracle_weather,125,78,7202.3,-3219.2,5399.5,-1337.4,96.9,23191.6,77.7
+early_seasonality_table,early,125,71,7008.6,-3403.9,5495.8,-2033.0,96.9,24708.6,174.0
