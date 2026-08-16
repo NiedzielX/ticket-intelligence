@@ -2,6 +2,7 @@
 
 import json
 import math
+import time
 from pathlib import Path
 from datetime import date, timedelta
 
@@ -10,7 +11,7 @@ import pandas as pd
 import requests
 
 
-SCRIPT_VERSION = "lech-demand-enrichment-v1.2"
+SCRIPT_VERSION = "lech-demand-enrichment-v1.2-fix1"
 print(f"Lech Demand Enrichment: {SCRIPT_VERSION}")
 
 ART = Path("lech_demand_artifacts_v12")
@@ -224,7 +225,13 @@ def add_europe_context(df):
     )
 
 
-def fetch_weather_period(start_date, end_date, label):
+def fetch_weather_period(start_date, end_date, label, session=None):
+    """
+    Fetch a small ERA5 window with retries.
+
+    Full-season ERA5 requests are intentionally avoided because the archive
+    endpoint may take too long to build large hourly responses.
+    """
     params = {
         "latitude": STADIUM_LAT,
         "longitude": STADIUM_LON,
@@ -236,38 +243,197 @@ def fetch_weather_period(start_date, end_date, label):
         "models": "era5",
     }
 
-    print(f"Fetching ERA5 weather {label}: {start_date} -> {end_date}")
+    client = session or requests.Session()
 
-    response = requests.get(
-        WEATHER_URL,
-        params=params,
-        timeout=120,
-        headers={
-            "User-Agent": "ticket-intelligence/1.2"
-        },
+    print(
+        f"Fetching ERA5 weather {label}: "
+        f"{start_date} -> {end_date}"
     )
-    response.raise_for_status()
-    payload = response.json()
 
-    if "hourly" not in payload or "daily" not in payload:
-        raise RuntimeError(
-            f"Unexpected Open-Meteo response for {label}: "
-            f"{payload.keys()}"
+    last_error = None
+
+    for attempt in range(1, 5):
+        try:
+            response = client.get(
+                WEATHER_URL,
+                params=params,
+                timeout=(20, 90),
+                headers={
+                    "User-Agent": "ticket-intelligence/1.2-fix1"
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+            if (
+                "hourly" not in payload
+                or "daily" not in payload
+            ):
+                raise RuntimeError(
+                    f"Unexpected Open-Meteo response for {label}: "
+                    f"{payload.keys()}"
+                )
+
+            safe_label = re.sub(
+                r"[^A-Za-z0-9_.-]+",
+                "_",
+                label,
+            )
+
+            (
+                ART / f"weather_{safe_label}.json"
+            ).write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+
+            hourly = pd.DataFrame(payload["hourly"])
+            daily = pd.DataFrame(payload["daily"])
+
+            hourly["time"] = pd.to_datetime(
+                hourly["time"]
+            )
+            daily["time"] = pd.to_datetime(
+                daily["time"]
+            ).dt.date
+
+            return hourly, daily
+
+        except (
+            requests.Timeout,
+            requests.ConnectionError,
+            requests.HTTPError,
+            ValueError,
+        ) as exc:
+            last_error = exc
+
+            if attempt == 4:
+                break
+
+            wait_seconds = [2, 5, 10][attempt - 1]
+
+            print(
+                f"  attempt {attempt}/4 failed: {exc}. "
+                f"Retrying in {wait_seconds}s..."
+            )
+
+            time.sleep(wait_seconds)
+
+    raise RuntimeError(
+        f"Open-Meteo failed for {label} "
+        f"({start_date} -> {end_date}) after 4 attempts: "
+        f"{last_error}"
+    )
+
+
+def build_weather_chunks(match_days, max_span_days=35):
+    """
+    Group only the dates we actually need.
+
+    A season used to be requested as one ~10-month hourly response.
+    Instead, nearby match dates are grouped into short windows capped
+    at max_span_days. This dramatically reduces response size.
+    """
+    days = sorted(set(match_days))
+
+    if not days:
+        return []
+
+    chunks = []
+    chunk = [days[0]]
+
+    for current in days[1:]:
+        proposed_span = (
+            pd.Timestamp(current)
+            - pd.Timestamp(chunk[0])
+        ).days
+
+        # Keep nearby fixtures together, but never create a long ERA5 query.
+        gap = (
+            pd.Timestamp(current)
+            - pd.Timestamp(chunk[-1])
+        ).days
+
+        if proposed_span <= max_span_days and gap <= 24:
+            chunk.append(current)
+        else:
+            chunks.append(chunk)
+            chunk = [current]
+
+    chunks.append(chunk)
+
+    return chunks
+
+
+def fetch_weather_chunk_with_fallback(
+    chunk,
+    season,
+    chunk_no,
+    session,
+):
+    start = min(chunk)
+    end = max(chunk)
+
+    label = (
+        f"{season.replace('/', '_')}_chunk_{chunk_no:02d}"
+    )
+
+    try:
+        return fetch_weather_period(
+            start,
+            end,
+            label,
+            session=session,
+        )
+    except RuntimeError as exc:
+        print(
+            f"Chunk request failed permanently: {exc}"
+        )
+        print(
+            "Falling back to exact match-day requests "
+            "for this chunk."
         )
 
-    (ART / f"weather_{label.replace('/', '_')}.json").write_text(
-        json.dumps(payload),
-        encoding="utf-8",
+    hourly_parts = []
+    daily_parts = []
+
+    for day_no, day in enumerate(chunk, start=1):
+        day_label = (
+            f"{season.replace('/', '_')}_"
+            f"chunk_{chunk_no:02d}_day_{day_no:02d}"
+        )
+
+        hourly, daily = fetch_weather_period(
+            day,
+            day,
+            day_label,
+            session=session,
+        )
+
+        hourly_parts.append(hourly)
+        daily_parts.append(daily)
+
+    hourly = (
+        pd.concat(
+            hourly_parts,
+            ignore_index=True,
+        )
+        .drop_duplicates(subset=["time"])
+        .sort_values("time")
+        .reset_index(drop=True)
     )
 
-    hourly = pd.DataFrame(payload["hourly"])
-    daily = pd.DataFrame(payload["daily"])
-
-    hourly["time"] = pd.to_datetime(hourly["time"])
-    daily["time"] = pd.to_datetime(daily["time"]).dt.date
+    daily = (
+        pd.concat(
+            daily_parts,
+            ignore_index=True,
+        )
+        .drop_duplicates(subset=["time"])
+        .sort_values("time")
+        .reset_index(drop=True)
+    )
 
     return hourly, daily
-
 
 def add_weather(df):
     out = df.copy()
@@ -282,15 +448,63 @@ def add_weather(df):
     out["_local_day"] = local.dt.date
 
     enriched = []
+    session = requests.Session()
 
     for season, group in out.groupby("season", sort=True):
-        start = group["_local_day"].min()
-        end = group["_local_day"].max()
+        match_days = sorted(
+            set(group["_local_day"].tolist())
+        )
 
-        hourly, daily = fetch_weather_period(
-            start,
-            end,
-            season,
+        chunks = build_weather_chunks(
+            match_days,
+            max_span_days=35,
+        )
+
+        print(
+            f"{season}: {len(match_days)} match days "
+            f"-> {len(chunks)} weather chunks"
+        )
+
+        hourly_parts = []
+        daily_parts = []
+
+        for chunk_no, chunk in enumerate(
+            chunks,
+            start=1,
+        ):
+            hourly, daily = (
+                fetch_weather_chunk_with_fallback(
+                    chunk,
+                    season,
+                    chunk_no,
+                    session,
+                )
+            )
+
+            hourly_parts.append(hourly)
+            daily_parts.append(daily)
+
+            # Be polite to the public endpoint.
+            time.sleep(0.5)
+
+        hourly = (
+            pd.concat(
+                hourly_parts,
+                ignore_index=True,
+            )
+            .drop_duplicates(subset=["time"])
+            .sort_values("time")
+            .reset_index(drop=True)
+        )
+
+        daily = (
+            pd.concat(
+                daily_parts,
+                ignore_index=True,
+            )
+            .drop_duplicates(subset=["time"])
+            .sort_values("time")
+            .reset_index(drop=True)
         )
 
         daily_by_date = daily.set_index("time")
@@ -309,6 +523,12 @@ def add_weather(df):
                     .idxmin()
                 )
                 h = same_day.loc[nearest_idx]
+
+                if ts.date() not in daily_by_date.index:
+                    weather = {}
+                    enriched.append((idx, weather))
+                    continue
+
                 d = daily_by_date.loc[ts.date()]
 
                 weather = {
