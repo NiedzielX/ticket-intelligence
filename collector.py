@@ -163,7 +163,7 @@ def insert_sector_inventory(snapshot_id, sectors):
     rows = [
         {
             "snapshot_id": snapshot_id,
-            "event_id": EVENT_ID,
+            "event_id": None,
             "sector": sector_id,
             "available": available,
         }
