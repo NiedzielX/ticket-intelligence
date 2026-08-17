@@ -4,9 +4,11 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - agent/beyond-forecast-v01
+      - agent/forecast-ledger-v01
     paths:
       - build_beyond_forecast_v01.py
+      - persist_forecast_observation_v01.py
+      - sql/forecast_observations_v01.sql
       - .github/workflows/beyond-forecast-v01.yml
   schedule:
     - cron: "35 * * * *"
@@ -32,6 +34,7 @@ jobs:
       TOTAL_LEAGUE_MATCHES_PER_TEAM: "34"
       STADIUM_CAPACITY: "43269"
       VALIDATE_BASELINE: ${{ github.event_name == 'push' && 'true' || 'false' }}
+      PERSIST_FORECAST: "false"
       EXPECTED_HOLDOUT_MAE: "5321.8"
       HOLDOUT_MAE_TOLERANCE: "1.0"
       TRANSIENT_JUMP_THRESHOLD: "500"
@@ -59,6 +62,10 @@ jobs:
 
       - name: Build Beyond Forecast
         run: python build_beyond_forecast_v01.py
+
+      - name: Persist forecast observation
+        if: env.PERSIST_FORECAST == 'true'
+        run: python persist_forecast_observation_v01.py
 
       - name: Upload Beyond Forecast artifact
         if: always()
