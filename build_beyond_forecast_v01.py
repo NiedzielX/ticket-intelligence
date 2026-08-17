@@ -17,6 +17,7 @@ VERSION = "beyond-forecast-v0.1"
 EVENT_ID = int(os.environ["EVENT_ID"])
 EVENT_PROVIDER = os.getenv("EVENT_PROVIDER", "roboticket")
 TOTAL_MATCHES = int(os.getenv("TOTAL_LEAGUE_MATCHES_PER_TEAM", "34"))
+STADIUM_CAPACITY = int(os.getenv("STADIUM_CAPACITY", "43269"))
 VALIDATE = os.getenv("VALIDATE_BASELINE", "false").lower() == "true"
 EXPECTED_MAE = float(os.getenv("EXPECTED_HOLDOUT_MAE", "5321.8"))
 MAE_TOLERANCE = float(os.getenv("HOLDOUT_MAE_TOLERANCE", "1.0"))
@@ -276,8 +277,11 @@ def historical_forecast(event):
         model__sample_weight=model_v13.recency_weights(train),
     )
     residual = float(model.predict(future[FEATURES])[0])
-    p50 = float(future.iloc[0]["rolling_5"] + residual)
+    raw_p50 = float(future.iloc[0]["rolling_5"] + residual)
     radius = float(interval["radius"])
+    p10 = float(np.clip(raw_p50 - radius, 0, STADIUM_CAPACITY))
+    p50 = float(np.clip(raw_p50, 0, STADIUM_CAPACITY))
+    p90 = float(np.clip(raw_p50 + radius, 0, STADIUM_CAPACITY))
     clean_context = {
         k: round(float(v), 4) if isinstance(v, (float, np.floating))
         else int(v) if isinstance(v, (int, np.integer))
@@ -292,9 +296,12 @@ def historical_forecast(event):
         "context_season": season,
         "sporting_context_as_of": datetime.now(timezone.utc).isoformat(),
         "historical_attendance_rows_available": len(hist),
-        "p10": round(max(0, p50 - radius)),
+        "p10": round(p10),
         "p50": round(p50),
-        "p90": round(p50 + radius),
+        "p90": round(p90),
+        "raw_p50_before_capacity_cap": round(raw_p50),
+        "stadium_capacity": STADIUM_CAPACITY,
+        "capacity_cap_applied": bool(raw_p50 + radius > STADIUM_CAPACITY or raw_p50 > STADIUM_CAPACITY),
         "conformal_radius": round(radius, 1),
         "rolling_5_baseline": round(float(future.iloc[0]["rolling_5"]), 1),
         "residual_prediction": round(residual, 1),
