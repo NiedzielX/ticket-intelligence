@@ -30,7 +30,8 @@ jobs:
       EVENT_ID: ${{ matrix.event_id }}
       EVENT_PROVIDER: "roboticket"
       TOTAL_LEAGUE_MATCHES_PER_TEAM: "34"
-      VALIDATE_BASELINE: "true"
+      STADIUM_CAPACITY: "43269"
+      VALIDATE_BASELINE: ${{ github.event_name == 'push' && 'true' || 'false' }}
       EXPECTED_HOLDOUT_MAE: "5321.8"
       HOLDOUT_MAE_TOLERANCE: "1.0"
       TRANSIENT_JUMP_THRESHOLD: "500"
