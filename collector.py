@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+from datetime import datetime, timezone
 from urllib import request, error
 from urllib.parse import urlencode, urlparse
 
@@ -12,6 +13,13 @@ from playwright.async_api import async_playwright
 EVENT_ID = int(os.environ["EVENT_ID"])
 EVENT_URL = os.environ["ROBOTICKET_URL"]
 EVENT_PROVIDER = os.getenv("EVENT_PROVIDER", "roboticket")
+EVENT_HOME_TEAM = os.getenv("EVENT_HOME_TEAM")
+EVENT_AWAY_TEAM = os.getenv("EVENT_AWAY_TEAM")
+EVENT_COMPETITION = os.getenv("EVENT_COMPETITION")
+EVENT_MATCH_DATE = os.getenv("EVENT_MATCH_DATE")
+EVENT_KICKOFF_AT = os.getenv("EVENT_KICKOFF_AT")
+EVENT_MAPPING_SOURCE = os.getenv("EVENT_MAPPING_SOURCE")
+EVENT_MAPPING_CONFIDENCE = os.getenv("EVENT_MAPPING_CONFIDENCE", "high")
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
@@ -95,6 +103,52 @@ def resolve_ticket_event_id():
         )
 
     return result[0]["id"]
+
+
+def sync_ticket_event_metadata(ticket_event_id):
+
+    required = {
+        "EVENT_HOME_TEAM": EVENT_HOME_TEAM,
+        "EVENT_AWAY_TEAM": EVENT_AWAY_TEAM,
+        "EVENT_MATCH_DATE": EVENT_MATCH_DATE,
+        "EVENT_KICKOFF_AT": EVENT_KICKOFF_AT,
+    }
+
+    missing = [
+        name
+        for name, value in required.items()
+        if not value
+    ]
+
+    if missing:
+        raise RuntimeError(
+            "Missing event metadata configuration: "
+            + ", ".join(missing)
+        )
+
+    result = api(
+        f"ticket_events?id=eq.{ticket_event_id}",
+        "PATCH",
+        {
+            "home_team": EVENT_HOME_TEAM,
+            "away_team": EVENT_AWAY_TEAM,
+            "competition": EVENT_COMPETITION,
+            "match_date": EVENT_MATCH_DATE,
+            "kickoff_at": EVENT_KICKOFF_AT,
+            "source_url": EVENT_URL,
+            "mapping_source": EVENT_MAPPING_SOURCE,
+            "mapping_confidence": EVENT_MAPPING_CONFIDENCE,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        "return=representation",
+    )
+
+    if not result or len(result) != 1:
+        raise RuntimeError(
+            f"Failed to update ticket event {ticket_event_id}."
+        )
+
+    return result[0]
 
 
 def create_snapshot(ticket_event_id):
@@ -423,9 +477,18 @@ async def main():
 
         ticket_event_id = resolve_ticket_event_id()
 
+        event_metadata = sync_ticket_event_metadata(
+            ticket_event_id
+        )
+
         print(
             f"Resolved ticket event {ticket_event_id} "
             f"for {EVENT_PROVIDER}:{EVENT_ID}"
+        )
+
+        print(
+            "Event kickoff:",
+            event_metadata["kickoff_at"],
         )
 
         snapshot_id = create_snapshot(
