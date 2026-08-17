@@ -72,7 +72,7 @@ def validate_event_metadata():
 def event_metadata_payload():
     return {
         "provider": EVENT_PROVIDER,
-        "external_event_id": EVENT_ID,
+        "external_event_id": str(EVENT_ID),
         "home_team": EVENT_HOME_TEAM,
         "away_team": EVENT_AWAY_TEAM,
         "competition": EVENT_COMPETITION,
@@ -136,7 +136,7 @@ def create_snapshot(ticket_event_id):
         "snapshots",
         "POST",
         {
-            "event_id": EVENT_ID,
+            "event_id": None,
             "source": EVENT_PROVIDER,
             "ticket_event_id": ticket_event_id,
         },
