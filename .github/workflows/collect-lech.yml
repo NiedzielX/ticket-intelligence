@@ -11,19 +11,45 @@ permissions:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
+
+    strategy:
+      fail-fast: false
+      matrix:
+        event:
+          - id: "10069"
+            provider: "roboticket"
+            home_team: "Lech Poznań"
+            away_team: "Jagiellonia Białystok"
+            competition: "Ekstraklasa"
+            match_date: "2026-09-03"
+            kickoff_at: "2026-09-03T20:30:00+02:00"
+            mapping_source: "fixture_schedule_update_2026-08-17"
+            mapping_confidence: "high"
+            url: "https://bilety.lechpoznan.pl/Stadium/Index?eventId=10069"
+
+          - id: "10102"
+            provider: "roboticket"
+            home_team: "Lech Poznań"
+            away_team: "Thun"
+            competition: "UEFA Europa League"
+            match_date: "2026-08-20"
+            kickoff_at: "2026-08-20T19:00:00+02:00"
+            mapping_source: "fixture_schedule_update_2026-08-17"
+            mapping_confidence: "high"
+            url: "https://bilety.lechpoznan.pl/Stadium?eventId=10102"
 
     env:
-      EVENT_ID: "10234"
-      EVENT_PROVIDER: "roboticket"
-      EVENT_HOME_TEAM: "Lech Poznań"
-      EVENT_AWAY_TEAM: "Jagiellonia Białystok"
-      EVENT_COMPETITION: "Ekstraklasa"
-      EVENT_MATCH_DATE: "2026-09-03"
-      EVENT_KICKOFF_AT: "2026-09-03T20:30:00+02:00"
-      EVENT_MAPPING_SOURCE: "fixture_schedule_update_2026-08-17"
-      EVENT_MAPPING_CONFIDENCE: "high"
-      ROBOTICKET_URL: "https://bilety.lechpoznan.pl/Stadium/Index?eventId=10234"
+      EVENT_ID: ${{ matrix.event.id }}
+      EVENT_PROVIDER: ${{ matrix.event.provider }}
+      EVENT_HOME_TEAM: ${{ matrix.event.home_team }}
+      EVENT_AWAY_TEAM: ${{ matrix.event.away_team }}
+      EVENT_COMPETITION: ${{ matrix.event.competition }}
+      EVENT_MATCH_DATE: ${{ matrix.event.match_date }}
+      EVENT_KICKOFF_AT: ${{ matrix.event.kickoff_at }}
+      EVENT_MAPPING_SOURCE: ${{ matrix.event.mapping_source }}
+      EVENT_MAPPING_CONFIDENCE: ${{ matrix.event.mapping_confidence }}
+      ROBOTICKET_URL: ${{ matrix.event.url }}
 
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
