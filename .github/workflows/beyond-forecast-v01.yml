@@ -1,0 +1,67 @@
+name: Beyond Forecast v0.1
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - agent/beyond-forecast-v01
+    paths:
+      - build_beyond_forecast_v01.py
+      - .github/workflows/beyond-forecast-v01.yml
+  schedule:
+    - cron: "35 * * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        event_id:
+          - "10069"
+          - "10102"
+
+    env:
+      EVENT_ID: ${{ matrix.event_id }}
+      EVENT_PROVIDER: "roboticket"
+      TOTAL_LEAGUE_MATCHES_PER_TEAM: "34"
+      VALIDATE_BASELINE: "true"
+      EXPECTED_HOLDOUT_MAE: "5321.8"
+      HOLDOUT_MAE_TOLERANCE: "1.0"
+      TRANSIENT_JUMP_THRESHOLD: "500"
+      TRANSIENT_RETURN_TOLERANCE: "100"
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy requests scikit-learn joblib
+
+      - name: Build leakage-safe historical dataset
+        run: python build_lech_demand_dataset_v11.py
+
+      - name: Build Beyond Forecast
+        run: python build_beyond_forecast_v01.py
+
+      - name: Upload Beyond Forecast artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: beyond-forecast-v0-1-${{ matrix.event_id }}
+          path: beyond_forecast_artifacts_v01/
+          retention-days: 30
