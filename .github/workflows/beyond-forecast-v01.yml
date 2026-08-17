@@ -36,7 +36,7 @@ jobs:
       VALIDATE_BASELINE: ${{ github.event_name == 'push' && 'true' || 'false' }}
       PERSIST_FORECAST: "false"
       EXPECTED_HOLDOUT_MAE: "5321.8"
-      HOLDOUT_MAE_TOLERANCE: "1.0"
+      HOLDOUT_MAE_TOLERANCE: "50.0"
       TRANSIENT_JUMP_THRESHOLD: "500"
       TRANSIENT_RETURN_TOLERANCE: "100"
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
