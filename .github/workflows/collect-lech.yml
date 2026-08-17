@@ -2,12 +2,6 @@ name: Collect Lech inventory
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - agent/event-metadata-v01
-    paths:
-      - collector.py
-      - .github/workflows/collect-lech.yml
   schedule:
     - cron: "13 * * * *"
 
