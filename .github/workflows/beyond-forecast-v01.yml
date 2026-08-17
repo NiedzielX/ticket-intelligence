@@ -54,6 +54,7 @@ jobs:
           pip install pandas numpy requests scikit-learn joblib
 
       - name: Build leakage-safe historical dataset
+        if: matrix.event_id == '10069'
         run: python build_lech_demand_dataset_v11.py
 
       - name: Build Beyond Forecast
