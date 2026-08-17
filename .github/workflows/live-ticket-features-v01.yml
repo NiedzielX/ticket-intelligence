@@ -1,0 +1,55 @@
+name: Live Ticket Features v0.1
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - agent/live-ticket-features-v01
+    paths:
+      - build_live_ticket_features_v01.py
+      - .github/workflows/live-ticket-features-v01.yml
+  schedule:
+    - cron: "25 * * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        event_id:
+          - "10069"
+          - "10102"
+
+    env:
+      EVENT_ID: ${{ matrix.event_id }}
+      EVENT_PROVIDER: "roboticket"
+      TRANSIENT_JUMP_THRESHOLD: "500"
+      TRANSIENT_RETURN_TOLERANCE: "100"
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build live ticket features
+        run: python build_live_ticket_features_v01.py
+
+      - name: Upload live ticket feature artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-ticket-features-v0-1-${{ matrix.event_id }}
+          path: live_ticket_artifacts_v01/
+          retention-days: 30
