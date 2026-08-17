@@ -54,31 +54,11 @@ def api(path, method="GET", body=None, prefer=None):
         raise RuntimeError(f"Supabase {exc.code}: {detail}") from exc
 
 
-def resolve_ticket_event_id():
-    query = urlencode(
-        {
-            "provider": f"eq.{EVENT_PROVIDER}",
-            "external_event_id": f"eq.{EVENT_ID}",
-            "select": "id",
-        }
-    )
-    result = api(f"ticket_events?{query}")
-    if not result:
-        raise RuntimeError(
-            f"No ticket_events mapping found for {EVENT_PROVIDER}:{EVENT_ID}."
-        )
-    if len(result) != 1:
-        raise RuntimeError(
-            f"Expected one ticket_events mapping for {EVENT_PROVIDER}:{EVENT_ID}, "
-            f"found {len(result)}."
-        )
-    return result[0]["id"]
-
-
-def sync_ticket_event_metadata(ticket_event_id):
+def validate_event_metadata():
     required = {
         "EVENT_HOME_TEAM": EVENT_HOME_TEAM,
         "EVENT_AWAY_TEAM": EVENT_AWAY_TEAM,
+        "EVENT_COMPETITION": EVENT_COMPETITION,
         "EVENT_MATCH_DATE": EVENT_MATCH_DATE,
         "EVENT_KICKOFF_AT": EVENT_KICKOFF_AT,
     }
@@ -88,25 +68,67 @@ def sync_ticket_event_metadata(ticket_event_id):
             "Missing event metadata configuration: " + ", ".join(missing)
         )
 
-    result = api(
-        f"ticket_events?id=eq.{ticket_event_id}",
-        "PATCH",
+
+def event_metadata_payload():
+    return {
+        "provider": EVENT_PROVIDER,
+        "external_event_id": EVENT_ID,
+        "home_team": EVENT_HOME_TEAM,
+        "away_team": EVENT_AWAY_TEAM,
+        "competition": EVENT_COMPETITION,
+        "match_date": EVENT_MATCH_DATE,
+        "kickoff_at": EVENT_KICKOFF_AT,
+        "source_url": EVENT_URL,
+        "mapping_source": EVENT_MAPPING_SOURCE,
+        "mapping_confidence": EVENT_MAPPING_CONFIDENCE,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def resolve_or_create_ticket_event():
+    validate_event_metadata()
+
+    query = urlencode(
         {
-            "home_team": EVENT_HOME_TEAM,
-            "away_team": EVENT_AWAY_TEAM,
-            "competition": EVENT_COMPETITION,
-            "match_date": EVENT_MATCH_DATE,
-            "kickoff_at": EVENT_KICKOFF_AT,
-            "source_url": EVENT_URL,
-            "mapping_source": EVENT_MAPPING_SOURCE,
-            "mapping_confidence": EVENT_MAPPING_CONFIDENCE,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        },
+            "provider": f"eq.{EVENT_PROVIDER}",
+            "external_event_id": f"eq.{EVENT_ID}",
+            "select": "id",
+        }
+    )
+    result = api(f"ticket_events?{query}")
+
+    if len(result or []) > 1:
+        raise RuntimeError(
+            f"Expected at most one ticket_events mapping for "
+            f"{EVENT_PROVIDER}:{EVENT_ID}, found {len(result)}."
+        )
+
+    payload = event_metadata_payload()
+
+    if result:
+        ticket_event_id = result[0]["id"]
+        updated = api(
+            f"ticket_events?id=eq.{ticket_event_id}",
+            "PATCH",
+            payload,
+            "return=representation",
+        )
+        if not updated or len(updated) != 1:
+            raise RuntimeError(f"Failed to update ticket event {ticket_event_id}.")
+        return updated[0]
+
+    payload["created_at"] = datetime.now(timezone.utc).isoformat()
+    created = api(
+        "ticket_events",
+        "POST",
+        payload,
         "return=representation",
     )
-    if not result or len(result) != 1:
-        raise RuntimeError(f"Failed to update ticket event {ticket_event_id}.")
-    return result[0]
+    if not created or len(created) != 1:
+        raise RuntimeError(
+            f"Failed to create ticket event for {EVENT_PROVIDER}:{EVENT_ID}."
+        )
+    return created[0]
 
 
 def create_snapshot(ticket_event_id):
@@ -261,8 +283,8 @@ async def main():
         for sector_id, available in sectors:
             print(f"Sector ID {sector_id}: {available} available")
 
-        ticket_event_id = resolve_ticket_event_id()
-        event_metadata = sync_ticket_event_metadata(ticket_event_id)
+        event_metadata = resolve_or_create_ticket_event()
+        ticket_event_id = event_metadata["id"]
 
         print(
             f"Resolved ticket event {ticket_event_id} "
