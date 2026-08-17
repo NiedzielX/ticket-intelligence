@@ -4,13 +4,14 @@ import asyncio
 import json
 import os
 from urllib import request, error
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from playwright.async_api import async_playwright
 
 
 EVENT_ID = int(os.environ["EVENT_ID"])
 EVENT_URL = os.environ["ROBOTICKET_URL"]
+EVENT_PROVIDER = os.getenv("EVENT_PROVIDER", "roboticket")
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
@@ -66,14 +67,45 @@ def api(path, method="GET", body=None, prefer=None):
         ) from exc
 
 
-def create_snapshot():
+def resolve_ticket_event_id():
+
+    query = urlencode(
+        {
+            "provider": f"eq.{EVENT_PROVIDER}",
+            "external_event_id": f"eq.{EVENT_ID}",
+            "select": "id",
+        }
+    )
+
+    result = api(
+        f"ticket_events?{query}"
+    )
+
+    if not result:
+        raise RuntimeError(
+            "No ticket_events mapping found for "
+            f"{EVENT_PROVIDER}:{EVENT_ID}."
+        )
+
+    if len(result) != 1:
+        raise RuntimeError(
+            "Expected one ticket_events mapping for "
+            f"{EVENT_PROVIDER}:{EVENT_ID}, "
+            f"found {len(result)}."
+        )
+
+    return result[0]["id"]
+
+
+def create_snapshot(ticket_event_id):
 
     result = api(
         "snapshots",
         "POST",
         {
             "event_id": EVENT_ID,
-            "source": "roboticket",
+            "source": EVENT_PROVIDER,
+            "ticket_event_id": ticket_event_id,
         },
         "return=representation",
     )
@@ -389,7 +421,16 @@ async def main():
         # Persist
         # -------------------------------------------------
 
-        snapshot_id = create_snapshot()
+        ticket_event_id = resolve_ticket_event_id()
+
+        print(
+            f"Resolved ticket event {ticket_event_id} "
+            f"for {EVENT_PROVIDER}:{EVENT_ID}"
+        )
+
+        snapshot_id = create_snapshot(
+            ticket_event_id
+        )
 
         inserted = insert_sector_inventory(
             snapshot_id,
