@@ -21,7 +21,7 @@ jobs:
       EVENT_COMPETITION: "Ekstraklasa"
       EVENT_MATCH_DATE: "2026-09-03"
       EVENT_KICKOFF_AT: "2026-09-03T20:30:00+02:00"
-      EVENT_MAPPING_SOURCE: "manual_verified_schedule_update_2026-08-17"
+      EVENT_MAPPING_SOURCE: "fixture_schedule_update_2026-08-17"
       EVENT_MAPPING_CONFIDENCE: "high"
       ROBOTICKET_URL: "https://bilety.lechpoznan.pl/Stadium/Index?eventId=10234"
 
