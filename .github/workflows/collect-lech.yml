@@ -15,6 +15,7 @@ jobs:
 
     env:
       EVENT_ID: "10234"
+      EVENT_PROVIDER: "roboticket"
       ROBOTICKET_URL: "https://bilety.lechpoznan.pl/Stadium/Index?eventId=10234"
 
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
