@@ -61,6 +61,40 @@ def schedule_snippet(body_text, opponent, radius=700):
     return body_text[start:end]
 
 
+async def schedule_dom_context(page, opponent):
+    return await page.evaluate(
+        r"""
+        opponent => {
+          const needle = opponent.toLowerCase();
+          const candidates = Array.from(document.querySelectorAll('*'))
+            .filter(el => {
+              const own = (el.innerText || '').replace(/\s+/g, ' ').trim();
+              return own.toLowerCase().includes(needle) && own.includes('Lech Poznań');
+            })
+            .map(el => {
+              const text = (el.innerText || '').replace(/\s+/g, ' ').trim();
+              const imgs = Array.from(el.querySelectorAll('img')).map(img => ({
+                src: img.getAttribute('src') || '',
+                alt: img.getAttribute('alt') || '',
+                title: img.getAttribute('title') || ''
+              }));
+              return {
+                tag: el.tagName || '',
+                className: typeof el.className === 'string' ? el.className : '',
+                id: el.id || '',
+                text: text.slice(0, 1500),
+                html: (el.outerHTML || '').slice(0, 10000),
+                imgs
+              };
+            })
+            .sort((a, b) => a.text.length - b.text.length);
+          return candidates.slice(0, 8);
+        }
+        """,
+        opponent,
+    )
+
+
 async def main():
     OUT.mkdir(parents=True, exist_ok=True)
     captured_json = []
@@ -179,12 +213,12 @@ async def main():
                 if is_first_team and not is_premium:
                     normal_first_team.append(row)
 
-        # Dedupe by provider event id.
-        normal_by_id = {row["event_id"]: row for row in normal_first_team}
-        normal_first_team = sorted(normal_by_id.values(), key=lambda x: int(x["event_id"]))
+        normal_first_team = sorted(
+            {row["event_id"]: row for row in normal_first_team}.values(),
+            key=lambda x: int(x["event_id"]),
+        )
         discovered = sorted(discovered, key=lambda x: int(x["event_id"]))
 
-        roboticket_body = await page.locator("body").inner_text()
         (OUT / "roboticket_boxes.json").write_text(
             json.dumps(boxes, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -200,7 +234,6 @@ async def main():
         (OUT / "response_index.json").write_text(
             json.dumps(response_index, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        (OUT / "roboticket_body.txt").write_text(roboticket_body, encoding="utf-8")
 
         print("Normal first-team Roboticket events:")
         for row in normal_first_team:
@@ -225,22 +258,35 @@ async def main():
         )
 
         snippets = {}
+        dom_contexts = {}
         for row in normal_first_team:
             opponent = row.get("opponent")
             if not opponent:
                 continue
             snippet = schedule_snippet(schedule_body, opponent)
+            dom_ctx = await schedule_dom_context(schedule_page, opponent)
             snippets[row["event_id"]] = {
                 "opponent": opponent,
                 "found": snippet is not None,
                 "snippet": snippet,
             }
+            dom_contexts[row["event_id"]] = dom_ctx
             print(f"Official schedule context for {row['event_id']} / {opponent}:")
-            print(normalize_space(snippet)[:1000] if snippet else "  NOT FOUND")
+            print(normalize_space(snippet)[:700] if snippet else "  NOT FOUND")
+            if dom_ctx:
+                best = dom_ctx[0]
+                print(
+                    "DOM candidate: "
+                    f"tag={best.get('tag')} class={best.get('className')} "
+                    f"id={best.get('id')} imgs={best.get('imgs')}"
+                )
+                print(f"DOM HTML: {best.get('html', '')[:2500]}")
 
         (OUT / "official_schedule_snippets.json").write_text(
-            json.dumps(snippets, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+            json.dumps(snippets, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        (OUT / "official_schedule_dom_context.json").write_text(
+            json.dumps(dom_contexts, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
         print(f"Candidate JSON responses: {len(captured_json)}")
