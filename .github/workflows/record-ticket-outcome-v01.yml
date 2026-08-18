@@ -1,0 +1,65 @@
+name: Record Ticket Event Outcome v0.1
+
+on:
+  workflow_dispatch:
+    inputs:
+      event_id:
+        description: "Roboticket event id"
+        required: true
+        type: string
+      actual_attendance:
+        description: "Confirmed official attendance"
+        required: true
+        type: string
+      source_name:
+        description: "Attendance source name"
+        required: true
+        type: string
+      source_url:
+        description: "Optional source URL"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  record-and-evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EVENT_ID: ${{ inputs.event_id }}
+      EVENT_PROVIDER: "roboticket"
+      ACTUAL_ATTENDANCE: ${{ inputs.actual_attendance }}
+      OUTCOME_SOURCE_NAME: ${{ inputs.source_name }}
+      OUTCOME_SOURCE_URL: ${{ inputs.source_url }}
+      ATTENDANCE_DEFINITION: "official_reported_attendance"
+      MAX_ATTENDANCE: "43269"
+      EVALUATION_HORIZONS_HOURS: "336,168,72,48,24"
+      HORIZON_MAX_EARLY_GAP_HOURS: "2.5"
+      MIN_CALIBRATION_EVENTS: "7"
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Record confirmed attendance
+        run: python record_ticket_event_outcome_v01.py
+
+      - name: Evaluate forecast horizons
+        run: python evaluate_forecast_horizons_v01.py
+
+      - name: Upload evaluation artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forecast-evaluation-v0-1-${{ inputs.event_id }}
+          path: forecast_evaluation_artifacts_v01/
+          retention-days: 90

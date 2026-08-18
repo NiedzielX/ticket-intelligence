@@ -1,0 +1,117 @@
+name: Forecast Evaluation v0.1
+
+on:
+  workflow_dispatch:
+    inputs:
+      event_id:
+        description: "Optional Roboticket event id; leave empty to evaluate all confirmed outcomes"
+        required: false
+        type: string
+  pull_request:
+    branches:
+      - main
+    paths:
+      - evaluate_forecast_horizons_v01.py
+      - test_forecast_evaluation_v01.py
+      - record_ticket_event_outcome_v01.py
+      - sql/ticket_event_outcomes_v01.sql
+      - .github/workflows/forecast-evaluation-v01.yml
+      - .github/workflows/record-ticket-outcome-v01.yml
+  push:
+    branches:
+      - agent/forecast-evaluation-v01
+    paths:
+      - evaluate_forecast_horizons_v01.py
+      - test_forecast_evaluation_v01.py
+      - record_ticket_event_outcome_v01.py
+      - sql/ticket_event_outcomes_v01.sql
+      - .github/workflows/forecast-evaluation-v01.yml
+      - .github/workflows/record-ticket-outcome-v01.yml
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile evaluation scripts
+        run: |
+          python -m py_compile evaluate_forecast_horizons_v01.py
+          python -m py_compile record_ticket_event_outcome_v01.py
+
+      - name: Run evaluation self-test
+        run: python test_forecast_evaluation_v01.py
+
+  schema-probe:
+    needs: self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+    steps:
+      - name: Verify ticket_event_outcomes exists
+        run: |
+          python - <<'PY'
+          import os
+          from urllib import request, error
+
+          url = os.environ['SUPABASE_URL'].rstrip('/') + '/rest/v1/ticket_event_outcomes?select=ticket_event_id&limit=1'
+          key = os.environ['SUPABASE_SECRET_KEY']
+          req = request.Request(url, headers={
+              'apikey': key,
+              'Authorization': f'Bearer {key}',
+              'Accept': 'application/json',
+          })
+          try:
+              with request.urlopen(req, timeout=30) as response:
+                  print(f'ticket_event_outcomes schema probe: HTTP {response.status}')
+                  print('SUCCESS')
+          except error.HTTPError as exc:
+              detail = exc.read().decode('utf-8', errors='replace')
+              raise RuntimeError(f'Supabase schema probe failed: HTTP {exc.code}: {detail}') from exc
+          PY
+
+  evaluate:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [self-test, schema-probe]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EVENT_ID: ${{ inputs.event_id }}
+      EVENT_PROVIDER: "roboticket"
+      EVALUATION_HORIZONS_HOURS: "336,168,72,48,24"
+      HORIZON_MAX_EARLY_GAP_HOURS: "2.5"
+      MIN_CALIBRATION_EVENTS: "7"
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Evaluate forecast horizons
+        run: python evaluate_forecast_horizons_v01.py
+
+      - name: Upload evaluation artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forecast-evaluation-v0-1
+          path: forecast_evaluation_artifacts_v01/
+          retention-days: 90
