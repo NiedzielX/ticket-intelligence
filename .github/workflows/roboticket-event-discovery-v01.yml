@@ -85,6 +85,49 @@ jobs:
       - name: Recover legacy Rakow snapshots
         run: python migrate_legacy_10234_v01.py
 
+      - name: Clean failed validation orphan
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from urllib import parse, request, error
+
+          base = os.environ['SUPABASE_URL'].rstrip('/') + '/rest/v1/'
+          key = os.environ['SUPABASE_SECRET_KEY']
+          headers = {
+              'apikey': key,
+              'Authorization': f'Bearer {key}',
+              'Accept': 'application/json',
+              'Content-Type': 'application/json',
+          }
+
+          def call(path, method='GET'):
+              req = request.Request(base + path, headers=headers, method=method)
+              try:
+                  with request.urlopen(req, timeout=30) as response:
+                      raw = response.read().decode('utf-8')
+                      return json.loads(raw) if raw else None
+              except error.HTTPError as exc:
+                  detail = exc.read().decode('utf-8', errors='replace')
+                  raise RuntimeError(f'Supabase HTTP {exc.code}: {detail}') from exc
+
+          snapshot = call('snapshots?' + parse.urlencode({
+              'id': 'eq.126',
+              'select': 'id',
+          })) or []
+          inventory = call('sector_inventory?' + parse.urlencode({
+              'snapshot_id': 'eq.126',
+              'select': 'snapshot_id',
+              'limit': '1',
+          })) or []
+
+          if snapshot and not inventory:
+              call('snapshots?' + parse.urlencode({'id': 'eq.126'}), 'DELETE')
+              print('Deleted empty validation snapshot 126.')
+          else:
+              print(f'No safe cleanup needed for snapshot 126: snapshot={len(snapshot)} inventory={len(inventory)}')
+          PY
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
