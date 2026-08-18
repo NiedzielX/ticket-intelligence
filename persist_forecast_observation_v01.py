@@ -12,6 +12,7 @@ SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
 EVENT_ID = int(os.environ["EVENT_ID"])
 ARTIFACT_DIR = Path(os.getenv("OUTPUT_DIR", "beyond_forecast_artifacts_v01"))
 ARTIFACT_PATH = ARTIFACT_DIR / f"event_{EVENT_ID}_beyond_forecast_v01.json"
+RESULT_PATH = Path(f"forecast_persist_result_{EVENT_ID}.json")
 
 
 def nullable_int(value):
@@ -125,6 +126,19 @@ def main():
     payload = json.loads(ARTIFACT_PATH.read_text(encoding="utf-8"))
     row = build_row(payload)
     persisted = upsert(row)
+
+    verification = {
+        "observation_id": int(persisted["id"]),
+        "ticket_event_id": int(persisted["ticket_event_id"]),
+        "source_snapshot_id": int(persisted["source_snapshot_id"]),
+        "hours_to_kickoff": persisted.get("hours_to_kickoff"),
+        "model_version": persisted.get("model_version"),
+        "final_p50": persisted.get("final_p50"),
+    }
+    RESULT_PATH.write_text(
+        json.dumps(verification, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
 
     print(
         "Persisted forecast observation: "
