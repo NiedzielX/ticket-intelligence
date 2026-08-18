@@ -34,7 +34,7 @@ jobs:
       TOTAL_LEAGUE_MATCHES_PER_TEAM: "34"
       STADIUM_CAPACITY: "43269"
       VALIDATE_BASELINE: ${{ github.event_name == 'push' && 'true' || 'false' }}
-      PERSIST_FORECAST: "false"
+      PERSIST_FORECAST: "true"
       EXPECTED_HOLDOUT_MAE: "5321.8"
       HOLDOUT_MAE_TOLERANCE: "50.0"
       TRANSIENT_JUMP_THRESHOLD: "500"
