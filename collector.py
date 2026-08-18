@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib import error, request
 from urllib.parse import urlencode, urlparse
 
@@ -20,6 +21,7 @@ EVENT_MATCH_DATE = os.getenv("EVENT_MATCH_DATE")
 EVENT_KICKOFF_AT = os.getenv("EVENT_KICKOFF_AT")
 EVENT_MAPPING_SOURCE = os.getenv("EVENT_MAPPING_SOURCE")
 EVENT_MAPPING_CONFIDENCE = os.getenv("EVENT_MAPPING_CONFIDENCE", "high")
+RESULT_DIR = Path(os.getenv("COLLECTOR_RESULT_DIR", "collector_results_v01"))
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
@@ -147,7 +149,7 @@ def create_snapshot(event_metadata):
     )
     if not result or len(result) != 1:
         raise RuntimeError("Failed to create snapshot.")
-    return result[0]["id"]
+    return result[0]
 
 
 def delete_snapshot(snapshot_id):
@@ -180,6 +182,28 @@ def insert_sector_inventory(snapshot_id, sectors):
     ]
     api("sector_inventory", "POST", rows)
     return len(rows)
+
+
+def write_result(event_metadata, snapshot_id, sector_count, total_available):
+    RESULT_DIR.mkdir(parents=True, exist_ok=True)
+    path = RESULT_DIR / f"event_{EVENT_ID}_collector_result_v01.json"
+    payload = {
+        "provider_event_id": str(EVENT_ID),
+        "ticket_event_id": int(event_metadata["id"]),
+        "snapshot_id": int(snapshot_id),
+        "home_team": event_metadata.get("home_team"),
+        "away_team": event_metadata.get("away_team"),
+        "competition": event_metadata.get("competition"),
+        "match_date": event_metadata.get("match_date"),
+        "kickoff_at": event_metadata.get("kickoff_at"),
+        "sector_count": int(sector_count),
+        "available_total": int(total_available),
+    }
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return path
 
 
 async def login_if_required(page):
@@ -316,11 +340,18 @@ async def main():
             raise
 
         total_available = sum(available for _, available in sectors)
+        result_path = write_result(
+            event_metadata,
+            snapshot_id,
+            inserted,
+            total_available,
+        )
 
         print("")
         print(f"Created snapshot {snapshot_id}")
         print(f"Inserted {inserted} sector records")
         print(f"Total available seats: {total_available}")
+        print(f"Collector result: {result_path}")
         print("")
         print("SUCCESS")
 
