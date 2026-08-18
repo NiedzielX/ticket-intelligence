@@ -7,12 +7,14 @@ on:
       - main
     paths:
       - discover_roboticket_events_v01.py
+      - sql/snapshot_event_context_v01.sql
       - .github/workflows/roboticket-event-discovery-v01.yml
   push:
     branches:
       - agent/auto-event-onboarding-v01
     paths:
       - discover_roboticket_events_v01.py
+      - sql/snapshot_event_context_v01.sql
       - .github/workflows/roboticket-event-discovery-v01.yml
 
 permissions:
@@ -21,7 +23,7 @@ permissions:
 jobs:
   discover:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
@@ -34,6 +36,57 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Validate snapshot schedule migration
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from urllib import parse, request, error
+
+          base = os.environ['SUPABASE_URL'].rstrip('/') + '/rest/v1/'
+          key = os.environ['SUPABASE_SECRET_KEY']
+          headers = {
+              'apikey': key,
+              'Authorization': f'Bearer {key}',
+              'Accept': 'application/json',
+          }
+
+          def get(path, params):
+              url = base + path + '?' + parse.urlencode(params)
+              req = request.Request(url, headers=headers)
+              try:
+                  with request.urlopen(req, timeout=30) as response:
+                      return json.loads(response.read().decode('utf-8') or '[]')
+              except error.HTTPError as exc:
+                  detail = exc.read().decode('utf-8', errors='replace')
+                  raise RuntimeError(f'Supabase HTTP {exc.code}: {detail}') from exc
+
+          probe = get('snapshots', {
+              'select': 'id,event_match_date_at_capture,event_kickoff_at_capture',
+              'limit': '1',
+          })
+          print(f'snapshot schedule columns: OK; probe rows={len(probe)}')
+
+          canonical = get('ticket_events', {
+              'provider': 'eq.roboticket',
+              'external_event_id': 'eq.10234',
+              'select': 'id,external_event_id,away_team,competition,match_date,kickoff_at',
+          })
+          legacy = get('snapshots', {
+              'event_id': 'eq.10234',
+              'ticket_event_id': 'is.null',
+              'select': 'id,captured_at,event_id,ticket_event_id',
+              'order': 'captured_at.asc',
+              'limit': '1000',
+          })
+          print('canonical_10234=' + json.dumps(canonical, ensure_ascii=False, separators=(',', ':')))
+          print(f'legacy_unlinked_10234_snapshots={len(legacy)}')
+          if legacy:
+              print(f'legacy_10234_first_snapshot={legacy[0]["id"]}@{legacy[0]["captured_at"]}')
+              print(f'legacy_10234_last_snapshot={legacy[-1]["id"]}@{legacy[-1]["captured_at"]}')
+          print('MIGRATION_PROBE_SUCCESS')
+          PY
 
       - name: Install dependencies
         run: |
