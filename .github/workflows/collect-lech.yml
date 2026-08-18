@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - agent/auto-event-onboarding-v01
+      - main
     paths:
       - collector.py
       - collect_discovered_events_v01.py
