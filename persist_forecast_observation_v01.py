@@ -10,6 +10,7 @@ from urllib import error, parse, request
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
 EVENT_ID = int(os.environ["EVENT_ID"])
+VERIFY_IDEMPOTENCY = os.getenv("VERIFY_IDEMPOTENCY", "false").lower() == "true"
 ARTIFACT_DIR = Path(os.getenv("OUTPUT_DIR", "beyond_forecast_artifacts_v01"))
 ARTIFACT_PATH = ARTIFACT_DIR / f"event_{EVENT_ID}_beyond_forecast_v01.json"
 RESULT_PATH = Path(f"forecast_persist_result_{EVENT_ID}.json")
@@ -127,6 +128,15 @@ def main():
     row = build_row(payload)
     persisted = upsert(row)
 
+    idempotent_upsert = None
+    if VERIFY_IDEMPOTENCY:
+        repeated = upsert(row)
+        idempotent_upsert = int(repeated["id"]) == int(persisted["id"])
+        if not idempotent_upsert:
+            raise RuntimeError(
+                "Idempotency check failed: repeated upsert returned a different observation id."
+            )
+
     verification = {
         "observation_id": int(persisted["id"]),
         "ticket_event_id": int(persisted["ticket_event_id"]),
@@ -134,6 +144,7 @@ def main():
         "hours_to_kickoff": persisted.get("hours_to_kickoff"),
         "model_version": persisted.get("model_version"),
         "final_p50": persisted.get("final_p50"),
+        "idempotent_upsert": idempotent_upsert,
     }
     RESULT_PATH.write_text(
         json.dumps(verification, ensure_ascii=False, separators=(",", ":")),
@@ -146,6 +157,8 @@ def main():
         f"snapshot={persisted['source_snapshot_id']} "
         f"hours_to_kickoff={persisted.get('hours_to_kickoff')}"
     )
+    if VERIFY_IDEMPOTENCY:
+        print(f"Idempotent upsert verified: {idempotent_upsert}")
     print("SUCCESS")
 
 
