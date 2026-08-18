@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 from datetime import datetime, timezone
-from urllib import request, error
+from urllib import error, request
 from urllib.parse import urlencode, urlparse
 
 from playwright.async_api import async_playwright
@@ -15,7 +15,7 @@ EVENT_URL = os.environ["ROBOTICKET_URL"]
 EVENT_PROVIDER = os.getenv("EVENT_PROVIDER", "roboticket")
 EVENT_HOME_TEAM = os.getenv("EVENT_HOME_TEAM")
 EVENT_AWAY_TEAM = os.getenv("EVENT_AWAY_TEAM")
-EVENT_COMPETITION = os.getenv("EVENT_COMPETITION")
+EVENT_COMPETITION = os.getenv("EVENT_COMPETITION") or None
 EVENT_MATCH_DATE = os.getenv("EVENT_MATCH_DATE")
 EVENT_KICKOFF_AT = os.getenv("EVENT_KICKOFF_AT")
 EVENT_MAPPING_SOURCE = os.getenv("EVENT_MAPPING_SOURCE")
@@ -58,7 +58,6 @@ def validate_event_metadata():
     required = {
         "EVENT_HOME_TEAM": EVENT_HOME_TEAM,
         "EVENT_AWAY_TEAM": EVENT_AWAY_TEAM,
-        "EVENT_COMPETITION": EVENT_COMPETITION,
         "EVENT_MATCH_DATE": EVENT_MATCH_DATE,
         "EVENT_KICKOFF_AT": EVENT_KICKOFF_AT,
     }
@@ -131,18 +130,26 @@ def resolve_or_create_ticket_event():
     return created[0]
 
 
-def create_snapshot(ticket_event_id):
+def create_snapshot(event_metadata):
     result = api(
         "snapshots",
         "POST",
         {
             "event_id": None,
             "source": EVENT_PROVIDER,
-            "ticket_event_id": ticket_event_id,
+            "ticket_event_id": event_metadata["id"],
+            "event_match_date_at_capture": event_metadata["match_date"],
+            "event_kickoff_at_capture": event_metadata["kickoff_at"],
         },
         "return=representation",
     )
+    if not result or len(result) != 1:
+        raise RuntimeError("Failed to create snapshot.")
     return result[0]["id"]
+
+
+def delete_snapshot(snapshot_id):
+    api(f"snapshots?id=eq.{snapshot_id}", "DELETE")
 
 
 def parse_sector_inventory(data):
@@ -292,8 +299,20 @@ async def main():
         )
         print("Event kickoff:", event_metadata["kickoff_at"])
 
-        snapshot_id = create_snapshot(ticket_event_id)
-        inserted = insert_sector_inventory(snapshot_id, sectors)
+        snapshot_id = create_snapshot(event_metadata)
+        try:
+            inserted = insert_sector_inventory(snapshot_id, sectors)
+        except Exception:
+            try:
+                delete_snapshot(snapshot_id)
+                print(f"Deleted orphan snapshot {snapshot_id} after inventory failure.")
+            except Exception as cleanup_error:
+                print(
+                    f"WARNING: failed to delete orphan snapshot {snapshot_id}: "
+                    f"{cleanup_error}"
+                )
+            raise
+
         total_available = sum(available for _, available in sectors)
 
         print("")
