@@ -3,11 +3,18 @@
 import json
 import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 MATRIX_PATH = Path("roboticket_discovery_artifacts_v01/collector_matrix.json")
 SUMMARY_PATH = Path("collector_results_v01/collection_summary_v01.json")
+
+
+def parse_timestamp(value):
+    if not value:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def main():
@@ -21,9 +28,40 @@ def main():
 
     results = []
     failures = []
+    skipped = []
+    now = datetime.now(timezone.utc)
 
     for event in matrix:
         event_id = str(event["id"])
+        kickoff = parse_timestamp(event.get("kickoff_at"))
+
+        if kickoff is None:
+            failures.append(event_id)
+            results.append(
+                {
+                    "event_id": event_id,
+                    "status": "failed",
+                    "reason": "missing_or_invalid_kickoff",
+                }
+            )
+            continue
+
+        if kickoff.astimezone(timezone.utc) <= now:
+            skipped.append(event_id)
+            results.append(
+                {
+                    "event_id": event_id,
+                    "status": "skipped",
+                    "reason": "kickoff_reached",
+                    "kickoff_at": event["kickoff_at"],
+                }
+            )
+            print(
+                f"Skipping {event_id}: kickoff already reached "
+                f"({event['kickoff_at']})."
+            )
+            continue
+
         env = os.environ.copy()
         env.update(
             {
@@ -67,6 +105,7 @@ def main():
     summary = {
         "discovered_event_count": len(matrix),
         "successful_event_count": sum(row["status"] == "success" for row in results),
+        "skipped_event_count": len(skipped),
         "failed_event_count": len(failures),
         "events": results,
     }
