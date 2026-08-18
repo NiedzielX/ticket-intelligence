@@ -18,7 +18,7 @@ on:
       - .github/workflows/sync-league-attendance-outcomes-v01.yml
   push:
     branches:
-      - agent/auto-outcomes-v01
+      - main
     paths:
       - sync_league_attendance_outcomes_v01.py
       - test_league_attendance_outcomes_v01.py
