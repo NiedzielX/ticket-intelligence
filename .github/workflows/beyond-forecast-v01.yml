@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - agent/forecast-ledger-v01
+      - main
     paths:
       - build_beyond_forecast_v01.py
       - persist_forecast_observation_v01.py
@@ -15,8 +15,6 @@ on:
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: write
 
 jobs:
   forecast:
@@ -37,7 +35,6 @@ jobs:
       STADIUM_CAPACITY: "43269"
       VALIDATE_BASELINE: ${{ github.event_name == 'push' && 'true' || 'false' }}
       PERSIST_FORECAST: "true"
-      VERIFY_IDEMPOTENCY: "true"
       EXPECTED_HOLDOUT_MAE: "5321.8"
       HOLDOUT_MAE_TOLERANCE: "50.0"
       TRANSIENT_JUMP_THRESHOLD: "500"
@@ -69,20 +66,6 @@ jobs:
       - name: Persist forecast observation
         if: env.PERSIST_FORECAST == 'true'
         run: python persist_forecast_observation_v01.py
-
-      - name: Report branch verification to PR 4
-        if: always() && github.ref == 'refs/heads/agent/forecast-ledger-v01'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          RESULT_FILE="forecast_persist_result_${EVENT_ID}.json"
-          if [ -f "$RESULT_FILE" ]; then
-            RESULT=$(cat "$RESULT_FILE")
-            BODY="forecast-ledger verification event=${EVENT_ID} job_status=${{ job.status }} persisted=${RESULT}"
-          else
-            BODY="forecast-ledger verification event=${EVENT_ID} job_status=${{ job.status }} persisted=none"
-          fi
-          gh api "repos/${GITHUB_REPOSITORY}/issues/4/comments" -f body="$BODY"
 
       - name: Upload Beyond Forecast artifact
         if: always()
