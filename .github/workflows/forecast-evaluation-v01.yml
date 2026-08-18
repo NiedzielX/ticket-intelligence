@@ -52,6 +52,37 @@ jobs:
       - name: Run evaluation self-test
         run: python test_forecast_evaluation_v01.py
 
+  schema-probe:
+    if: github.event_name == 'push'
+    needs: self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+    steps:
+      - name: Verify ticket_event_outcomes exists
+        run: |
+          python - <<'PY'
+          import os
+          from urllib import request, error
+
+          url = os.environ['SUPABASE_URL'].rstrip('/') + '/rest/v1/ticket_event_outcomes?select=ticket_event_id&limit=1'
+          key = os.environ['SUPABASE_SECRET_KEY']
+          req = request.Request(url, headers={
+              'apikey': key,
+              'Authorization': f'Bearer {key}',
+              'Accept': 'application/json',
+          })
+          try:
+              with request.urlopen(req, timeout=30) as response:
+                  print(f'ticket_event_outcomes schema probe: HTTP {response.status}')
+                  print('SUCCESS')
+          except error.HTTPError as exc:
+              detail = exc.read().decode('utf-8', errors='replace')
+              raise RuntimeError(f'Supabase schema probe failed: HTTP {exc.code}: {detail}') from exc
+          PY
+
   evaluate:
     if: github.event_name == 'workflow_dispatch'
     needs: self-test
