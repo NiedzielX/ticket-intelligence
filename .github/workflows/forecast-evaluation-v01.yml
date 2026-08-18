@@ -13,16 +13,20 @@ on:
     paths:
       - evaluate_forecast_horizons_v01.py
       - test_forecast_evaluation_v01.py
+      - record_ticket_event_outcome_v01.py
       - sql/ticket_event_outcomes_v01.sql
       - .github/workflows/forecast-evaluation-v01.yml
+      - .github/workflows/record-ticket-outcome-v01.yml
   push:
     branches:
       - agent/forecast-evaluation-v01
     paths:
       - evaluate_forecast_horizons_v01.py
       - test_forecast_evaluation_v01.py
+      - record_ticket_event_outcome_v01.py
       - sql/ticket_event_outcomes_v01.sql
       - .github/workflows/forecast-evaluation-v01.yml
+      - .github/workflows/record-ticket-outcome-v01.yml
 
 permissions:
   contents: read
@@ -39,6 +43,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Compile evaluation scripts
+        run: |
+          python -m py_compile evaluate_forecast_horizons_v01.py
+          python -m py_compile record_ticket_event_outcome_v01.py
 
       - name: Run evaluation self-test
         run: python test_forecast_evaluation_v01.py
