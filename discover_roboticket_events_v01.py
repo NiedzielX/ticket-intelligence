@@ -4,7 +4,7 @@ import asyncio
 import json
 import re
 from pathlib import Path
-from urllib.parse import urljoin, urlparse, parse_qs
+from urllib.parse import parse_qs, urljoin, urlparse
 
 from playwright.async_api import async_playwright
 
@@ -17,7 +17,8 @@ EVENT_ID_RE = re.compile(r"[?&]eventId=(\d+)", re.IGNORECASE)
 def event_id_from_url(url):
     try:
         parsed = urlparse(url)
-        values = parse_qs(parsed.query).get("eventId") or parse_qs(parsed.query).get("eventid")
+        query = parse_qs(parsed.query)
+        values = query.get("eventId") or query.get("eventid")
         if values and values[0].isdigit():
             return values[0]
     except Exception:
@@ -39,6 +40,12 @@ def json_contains_event_marker(value):
     elif isinstance(value, str):
         return "eventid=" in value.lower() or "/stadium" in value.lower()
     return False
+
+
+def add_unique(target, value):
+    value = (value or "").strip()
+    if value and value not in target:
+        target.append(value)
 
 
 async def main():
@@ -90,18 +97,39 @@ async def main():
         page.on("response", handle_response)
 
         print(f"Opening {START_URL}")
-        response = await page.goto(START_URL, wait_until="domcontentloaded", timeout=90000)
+        response = await page.goto(
+            START_URL,
+            wait_until="domcontentloaded",
+            timeout=90000,
+        )
         print("Initial status:", response.status if response else "none")
         await page.wait_for_timeout(8000)
 
         anchors = await page.locator("a[href]").evaluate_all(
-            """
-            els => els.map(a => ({
-                href: a.getAttribute('href') || '',
-                text: (a.innerText || a.textContent || '').replace(/\s+/g, ' ').trim(),
-                aria: a.getAttribute('aria-label') || '',
-                title: a.getAttribute('title') || ''
-            }))
+            r"""
+            els => els.map(a => {
+                const ancestors = [];
+                let node = a;
+                for (let depth = 0; depth < 7 && node; depth += 1, node = node.parentElement) {
+                    const text = (node.innerText || node.textContent || '')
+                        .replace(/\s+/g, ' ')
+                        .trim();
+                    ancestors.push({
+                        depth,
+                        tag: node.tagName || '',
+                        className: typeof node.className === 'string' ? node.className : '',
+                        text: text.slice(0, 1200),
+                        html: (node.outerHTML || '').slice(0, 6000)
+                    });
+                }
+                return {
+                    href: a.getAttribute('href') || '',
+                    text: (a.innerText || a.textContent || '').replace(/\s+/g, ' ').trim(),
+                    aria: a.getAttribute('aria-label') || '',
+                    title: a.getAttribute('title') || '',
+                    ancestors
+                };
+            })
             """
         )
 
@@ -117,14 +145,26 @@ async def main():
                     "event_id": event_id,
                     "urls": [],
                     "texts": [],
+                    "ancestor_texts": [],
+                    "anchor_contexts": [],
                 },
             )
-            if absolute not in current["urls"]:
-                current["urls"].append(absolute)
+            add_unique(current["urls"], absolute)
             for value in (anchor.get("text"), anchor.get("aria"), anchor.get("title")):
-                value = (value or "").strip()
-                if value and value not in current["texts"]:
-                    current["texts"].append(value)
+                add_unique(current["texts"], value)
+
+            context_record = {
+                "href": absolute,
+                "text": anchor.get("text"),
+                "aria": anchor.get("aria"),
+                "title": anchor.get("title"),
+                "ancestors": anchor.get("ancestors", []),
+            }
+            current["anchor_contexts"].append(context_record)
+            for ancestor in anchor.get("ancestors", []):
+                text = (ancestor.get("text") or "").strip()
+                if text and len(text) <= 1200:
+                    add_unique(current["ancestor_texts"], text)
 
         body_text = await page.locator("body").inner_text()
         page_info = {
@@ -134,8 +174,9 @@ async def main():
             "anchor_count": len(anchors),
         }
 
+        ordered_events = sorted(dom_events.values(), key=lambda x: int(x["event_id"]))
         (OUT / "dom_events.json").write_text(
-            json.dumps(sorted(dom_events.values(), key=lambda x: int(x["event_id"])), ensure_ascii=False, indent=2),
+            json.dumps(ordered_events, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         (OUT / "captured_event_json.json").write_text(
@@ -151,7 +192,14 @@ async def main():
             encoding="utf-8",
         )
 
-        print(f"DOM event ids: {sorted(dom_events.keys(), key=int)}")
+        print(f"DOM event ids: {[row['event_id'] for row in ordered_events]}")
+        for row in ordered_events:
+            candidate_contexts = [
+                text for text in row["ancestor_texts"]
+                if len(text) > 20 and text not in row["texts"]
+            ]
+            best = candidate_contexts[0] if candidate_contexts else " | ".join(row["texts"])
+            print(f"Event {row['event_id']}: {best[:500]}")
         print(f"Candidate JSON responses: {len(captured_json)}")
         print(f"Indexed responses: {len(response_index)}")
         print("SUCCESS")
