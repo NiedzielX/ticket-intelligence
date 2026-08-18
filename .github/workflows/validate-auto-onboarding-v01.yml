@@ -1,0 +1,78 @@
+name: Validate Auto Onboarding v0.1
+
+on:
+  push:
+    branches:
+      - agent/auto-event-onboarding-v01
+    paths:
+      - validate_auto_onboarding_v01.py
+      - collector.py
+      - discover_roboticket_events_v01.py
+      - build_live_ticket_features_v01.py
+      - build_beyond_forecast_v01.py
+      - build_active_ticket_event_matrix_v01.py
+      - sql/snapshot_event_context_v01.sql
+      - .github/workflows/validate-auto-onboarding-v01.yml
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      ROBOTICKET_USERNAME: ${{ secrets.ROBOTICKET_USERNAME }}
+      ROBOTICKET_PASSWORD: ${{ secrets.ROBOTICKET_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pandas numpy requests scikit-learn joblib
+          python -m playwright install --with-deps chromium
+
+      - name: Discover dynamic event matrix
+        run: python discover_roboticket_events_v01.py
+
+      - name: Validate collection, live features and forecast
+        run: python validate_auto_onboarding_v01.py
+
+      - name: Report validation to PR 6
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f auto_onboarding_validation_v01.json ]; then
+            SUMMARY=$(python -c "import json; d=json.load(open('auto_onboarding_validation_v01.json')); print(json.dumps(d,separators=(',',':'),ensure_ascii=False))")
+            BODY="auto-onboarding validation job_status=${{ job.status }} summary=${SUMMARY}"
+          else
+            BODY="auto-onboarding validation job_status=${{ job.status }} summary=unavailable"
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/issues/6/comments" -f body="$BODY"
+
+      - name: Upload validation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-onboarding-validation-v0-1
+          path: |
+            auto_onboarding_validation_v01.json
+            collector_results_v01/
+            roboticket_discovery_artifacts_v01/
+            live_ticket_artifacts_v01/
+            beyond_forecast_artifacts_v01/
+          retention-days: 14
