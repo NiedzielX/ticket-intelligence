@@ -2,6 +2,14 @@ name: Collect Lech inventory
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - agent/auto-event-onboarding-v01
+    paths:
+      - collector.py
+      - discover_roboticket_events_v01.py
+      - sql/snapshot_event_context_v01.sql
+      - .github/workflows/collect-lech.yml
   schedule:
     - cron: "13 * * * *"
 
@@ -9,35 +17,89 @@ permissions:
   contents: read
 
 jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      event_count: ${{ steps.matrix.outputs.event_count }}
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify snapshot schedule context migration
+        run: |
+          python - <<'PY'
+          import os
+          from urllib import request, error
+
+          url = (
+              os.environ['SUPABASE_URL'].rstrip('/')
+              + '/rest/v1/snapshots?select=event_match_date_at_capture,event_kickoff_at_capture&limit=1'
+          )
+          key = os.environ['SUPABASE_SECRET_KEY']
+          req = request.Request(url, headers={
+              'apikey': key,
+              'Authorization': f'Bearer {key}',
+              'Accept': 'application/json',
+          })
+          try:
+              with request.urlopen(req, timeout=30) as response:
+                  print(f'snapshot schedule context schema probe: HTTP {response.status}')
+          except error.HTTPError as exc:
+              detail = exc.read().decode('utf-8', errors='replace')
+              raise RuntimeError(
+                  f'Apply sql/snapshot_event_context_v01.sql before enabling auto-onboarding. '
+                  f'Supabase HTTP {exc.code}: {detail}'
+              ) from exc
+          PY
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Discover active Lech Roboticket events
+        run: python discover_roboticket_events_v01.py
+
+      - name: Publish collector matrix
+        id: matrix
+        run: |
+          MATRIX=$(cat roboticket_discovery_artifacts_v01/collector_matrix.json)
+          COUNT=$(python -c "import json; print(len(json.load(open('roboticket_discovery_artifacts_v01/collector_matrix.json'))))")
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "event_count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Discovered $COUNT collectible event(s)."
+
+      - name: Upload discovery diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lech-event-discovery
+          path: roboticket_discovery_artifacts_v01/
+          retention-days: 14
+
   collect:
+    needs: discover
+    if: needs.discover.outputs.event_count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 12
 
     strategy:
       fail-fast: false
       matrix:
-        event:
-          - id: "10069"
-            provider: "roboticket"
-            home_team: "Lech Poznań"
-            away_team: "Jagiellonia Białystok"
-            competition: "Ekstraklasa"
-            match_date: "2026-09-03"
-            kickoff_at: "2026-09-03T20:30:00+02:00"
-            mapping_source: "fixture_schedule_update_2026-08-17"
-            mapping_confidence: "high"
-            url: "https://bilety.lechpoznan.pl/Stadium/Index?eventId=10069"
-
-          - id: "10102"
-            provider: "roboticket"
-            home_team: "Lech Poznań"
-            away_team: "Thun"
-            competition: "UEFA Europa League"
-            match_date: "2026-08-20"
-            kickoff_at: "2026-08-20T19:00:00+02:00"
-            mapping_source: "fixture_schedule_update_2026-08-17"
-            mapping_confidence: "high"
-            url: "https://bilety.lechpoznan.pl/Stadium?eventId=10102"
+        event: ${{ fromJSON(needs.discover.outputs.matrix) }}
 
     env:
       EVENT_ID: ${{ matrix.event.id }}
