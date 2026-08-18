@@ -68,7 +68,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Install Chromium
-        run: python -m playwright install --with-deps chromium
+        run: python -m playwright install chromium
 
       - name: Discover active Lech Roboticket events
         run: python discover_roboticket_events_v01.py
