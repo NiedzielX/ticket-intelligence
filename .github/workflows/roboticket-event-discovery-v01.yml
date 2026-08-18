@@ -2,30 +2,6 @@ name: Roboticket Event Discovery v0.1
 
 on:
   workflow_dispatch:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - discover_roboticket_events_v01.py
-      - migrate_legacy_10234_v01.py
-      - validate_auto_onboarding_v01.py
-      - collector.py
-      - build_live_ticket_features_v01.py
-      - build_beyond_forecast_v01.py
-      - sql/snapshot_event_context_v01.sql
-      - .github/workflows/roboticket-event-discovery-v01.yml
-  push:
-    branches:
-      - agent/auto-event-onboarding-v01
-    paths:
-      - discover_roboticket_events_v01.py
-      - migrate_legacy_10234_v01.py
-      - validate_auto_onboarding_v01.py
-      - collector.py
-      - build_live_ticket_features_v01.py
-      - build_beyond_forecast_v01.py
-      - sql/snapshot_event_context_v01.sql
-      - .github/workflows/roboticket-event-discovery-v01.yml
 
 permissions:
   contents: read
@@ -33,12 +9,10 @@ permissions:
 jobs:
   discover:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 12
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-      ROBOTICKET_USERNAME: ${{ secrets.ROBOTICKET_USERNAME }}
-      ROBOTICKET_PASSWORD: ${{ secrets.ROBOTICKET_PASSWORD }}
 
     steps:
       - name: Checkout
@@ -49,107 +23,18 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Validate snapshot schedule migration
-        run: |
-          python - <<'PY'
-          import json
-          import os
-          from urllib import parse, request, error
-
-          base = os.environ['SUPABASE_URL'].rstrip('/') + '/rest/v1/'
-          key = os.environ['SUPABASE_SECRET_KEY']
-          headers = {
-              'apikey': key,
-              'Authorization': f'Bearer {key}',
-              'Accept': 'application/json',
-          }
-
-          def get(path, params):
-              url = base + path + '?' + parse.urlencode(params)
-              req = request.Request(url, headers=headers)
-              try:
-                  with request.urlopen(req, timeout=30) as response:
-                      return json.loads(response.read().decode('utf-8') or '[]')
-              except error.HTTPError as exc:
-                  detail = exc.read().decode('utf-8', errors='replace')
-                  raise RuntimeError(f'Supabase HTTP {exc.code}: {detail}') from exc
-
-          probe = get('snapshots', {
-              'select': 'id,event_match_date_at_capture,event_kickoff_at_capture',
-              'limit': '1',
-          })
-          print(f'snapshot schedule columns: OK; probe rows={len(probe)}')
-          print('MIGRATION_PROBE_SUCCESS')
-          PY
-
-      - name: Recover legacy Rakow snapshots
-        run: python migrate_legacy_10234_v01.py
-
-      - name: Clean failed validation orphan
-        run: |
-          python - <<'PY'
-          import json
-          import os
-          from urllib import parse, request, error
-
-          base = os.environ['SUPABASE_URL'].rstrip('/') + '/rest/v1/'
-          key = os.environ['SUPABASE_SECRET_KEY']
-          headers = {
-              'apikey': key,
-              'Authorization': f'Bearer {key}',
-              'Accept': 'application/json',
-              'Content-Type': 'application/json',
-          }
-
-          def call(path, method='GET'):
-              req = request.Request(base + path, headers=headers, method=method)
-              try:
-                  with request.urlopen(req, timeout=30) as response:
-                      raw = response.read().decode('utf-8')
-                      return json.loads(raw) if raw else None
-              except error.HTTPError as exc:
-                  detail = exc.read().decode('utf-8', errors='replace')
-                  raise RuntimeError(f'Supabase HTTP {exc.code}: {detail}') from exc
-
-          snapshot = call('snapshots?' + parse.urlencode({
-              'id': 'eq.126',
-              'select': 'id',
-          })) or []
-          inventory = call('sector_inventory?' + parse.urlencode({
-              'snapshot_id': 'eq.126',
-              'select': 'snapshot_id',
-              'limit': '1',
-          })) or []
-
-          if snapshot and not inventory:
-              call('snapshots?' + parse.urlencode({'id': 'eq.126'}), 'DELETE')
-              print('Deleted empty validation snapshot 126.')
-          else:
-              print(f'No safe cleanup needed for snapshot 126: snapshot={len(snapshot)} inventory={len(inventory)}')
-          PY
-
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pandas numpy requests scikit-learn joblib
           python -m playwright install chromium
 
-      - name: Discover dynamic event matrix
+      - name: Discover Roboticket events
         run: python discover_roboticket_events_v01.py
 
-      - name: Validate collection, live features and forecast
-        run: python validate_auto_onboarding_v01.py
-
-      - name: Upload validation artifacts
+      - name: Upload discovery artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: auto-onboarding-validation-v0-1
-          path: |
-            auto_onboarding_validation_v01.json
-            collector_results_v01/
-            roboticket_discovery_artifacts_v01/
-            live_ticket_artifacts_v01/
-            beyond_forecast_artifacts_v01/
-          retention-days: 14
+          name: roboticket-event-discovery-v0-1
+          path: roboticket_discovery_artifacts_v01/
+          retention-days: 7
