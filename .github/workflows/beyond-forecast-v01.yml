@@ -37,6 +37,7 @@ jobs:
       STADIUM_CAPACITY: "43269"
       VALIDATE_BASELINE: ${{ github.event_name == 'push' && 'true' || 'false' }}
       PERSIST_FORECAST: "true"
+      VERIFY_IDEMPOTENCY: "true"
       EXPECTED_HOLDOUT_MAE: "5321.8"
       HOLDOUT_MAE_TOLERANCE: "50.0"
       TRANSIENT_JUMP_THRESHOLD: "500"
