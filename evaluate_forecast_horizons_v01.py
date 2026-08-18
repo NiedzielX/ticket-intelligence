@@ -128,8 +128,6 @@ def select_asof_horizon(observations, target_hours, max_early_gap_hours):
         if hours is None:
             continue
         hours = float(hours)
-        # Strict as-of rule: a T-N evaluation may only use an observation that
-        # already existed before the T-N boundary, never one collected after it.
         if hours >= target_hours:
             candidates.append((hours - target_hours, row))
     if not candidates:
@@ -173,11 +171,16 @@ def make_evaluation_row(event, outcome, observation, target_hours):
         "actual_attendance": actual,
         "attendance_definition": outcome["attendance_definition"],
         "outcome_source_name": outcome["source_name"],
+        "model_version": observation.get("model_version"),
         "historical_model": observation.get("historical_model"),
+        "historical_p10": observation.get("historical_p10"),
         "historical_p50": historical_p50,
+        "historical_p90": observation.get("historical_p90"),
         "historical_error": historical_error,
         "historical_abs_error": historical_abs_error,
+        "final_p10": observation.get("final_p10"),
         "final_p50": final_p50,
+        "final_p90": observation.get("final_p90"),
         "final_error": final_error,
         "final_abs_error": final_abs_error,
         "forecast_status": observation.get("forecast_status"),
@@ -196,7 +199,6 @@ def make_evaluation_row(event, outcome, observation, target_hours):
         "live_acceleration_6h_vs_24h": observation.get(
             "live_acceleration_6h_vs_24h"
         ),
-        # This is the supervised target for a future live correction model.
         "historical_residual_target": historical_error,
     }
 
