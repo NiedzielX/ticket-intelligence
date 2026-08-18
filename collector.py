@@ -149,7 +149,7 @@ def create_snapshot(event_metadata):
     )
     if not result or len(result) != 1:
         raise RuntimeError("Failed to create snapshot.")
-    return result[0]
+    return int(result[0]["id"])
 
 
 def delete_snapshot(snapshot_id):
