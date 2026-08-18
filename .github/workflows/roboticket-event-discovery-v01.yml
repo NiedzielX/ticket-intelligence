@@ -7,6 +7,11 @@ on:
       - main
     paths:
       - discover_roboticket_events_v01.py
+      - migrate_legacy_10234_v01.py
+      - validate_auto_onboarding_v01.py
+      - collector.py
+      - build_live_ticket_features_v01.py
+      - build_beyond_forecast_v01.py
       - sql/snapshot_event_context_v01.sql
       - .github/workflows/roboticket-event-discovery-v01.yml
   push:
@@ -14,6 +19,11 @@ on:
       - agent/auto-event-onboarding-v01
     paths:
       - discover_roboticket_events_v01.py
+      - migrate_legacy_10234_v01.py
+      - validate_auto_onboarding_v01.py
+      - collector.py
+      - build_live_ticket_features_v01.py
+      - build_beyond_forecast_v01.py
       - sql/snapshot_event_context_v01.sql
       - .github/workflows/roboticket-event-discovery-v01.yml
 
@@ -23,10 +33,12 @@ permissions:
 jobs:
   discover:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 30
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      ROBOTICKET_USERNAME: ${{ secrets.ROBOTICKET_USERNAME }}
+      ROBOTICKET_PASSWORD: ${{ secrets.ROBOTICKET_PASSWORD }}
 
     steps:
       - name: Checkout
@@ -67,39 +79,34 @@ jobs:
               'limit': '1',
           })
           print(f'snapshot schedule columns: OK; probe rows={len(probe)}')
-
-          canonical = get('ticket_events', {
-              'provider': 'eq.roboticket',
-              'external_event_id': 'eq.10234',
-              'select': 'id,external_event_id,away_team,competition,match_date,kickoff_at',
-          })
-          legacy = get('snapshots', {
-              'event_id': 'eq.10234',
-              'ticket_event_id': 'is.null',
-              'select': 'id,captured_at,event_id,ticket_event_id',
-              'order': 'captured_at.asc',
-              'limit': '1000',
-          })
-          print('canonical_10234=' + json.dumps(canonical, ensure_ascii=False, separators=(',', ':')))
-          print(f'legacy_unlinked_10234_snapshots={len(legacy)}')
-          if legacy:
-              print(f'legacy_10234_first_snapshot={legacy[0]["id"]}@{legacy[0]["captured_at"]}')
-              print(f'legacy_10234_last_snapshot={legacy[-1]["id"]}@{legacy[-1]["captured_at"]}')
           print('MIGRATION_PROBE_SUCCESS')
           PY
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install pandas numpy requests scikit-learn joblib
           python -m playwright install --with-deps chromium
 
-      - name: Discover Roboticket events
+      - name: Recover legacy Rakow snapshots
+        run: python migrate_legacy_10234_v01.py
+
+      - name: Discover dynamic event matrix
         run: python discover_roboticket_events_v01.py
 
-      - name: Upload discovery artifact
+      - name: Validate collection, live features and forecast
+        run: python validate_auto_onboarding_v01.py
+
+      - name: Upload validation artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: roboticket-event-discovery-v0-1
-          path: roboticket_discovery_artifacts_v01/
-          retention-days: 7
+          name: auto-onboarding-validation-v0-1
+          path: |
+            auto_onboarding_validation_v01.json
+            collector_results_v01/
+            roboticket_discovery_artifacts_v01/
+            live_ticket_artifacts_v01/
+            beyond_forecast_artifacts_v01/
+          retention-days: 14
