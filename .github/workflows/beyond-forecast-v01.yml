@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - agent/auto-event-onboarding-v01
+      - main
     paths:
       - build_active_ticket_event_matrix_v01.py
       - build_live_ticket_features_v01.py
