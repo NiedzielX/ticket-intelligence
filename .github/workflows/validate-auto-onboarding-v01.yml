@@ -6,6 +6,7 @@ on:
       - agent/auto-event-onboarding-v01
     paths:
       - validate_auto_onboarding_v01.py
+      - migrate_legacy_10234_v01.py
       - collector.py
       - discover_roboticket_events_v01.py
       - build_live_ticket_features_v01.py
@@ -44,6 +45,9 @@ jobs:
           pip install -r requirements.txt
           pip install pandas numpy requests scikit-learn joblib
           python -m playwright install --with-deps chromium
+
+      - name: Recover legacy Rakow snapshots
+        run: python migrate_legacy_10234_v01.py
 
       - name: Discover dynamic event matrix
         run: python discover_roboticket_events_v01.py
