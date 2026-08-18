@@ -2,9 +2,13 @@
 
 import asyncio
 import json
+import os
 import re
+from datetime import datetime
 from pathlib import Path
+from urllib import error, parse, request
 from urllib.parse import parse_qs, urljoin, urlparse
+from zoneinfo import ZoneInfo
 
 from playwright.async_api import async_playwright
 
@@ -12,18 +16,27 @@ from playwright.async_api import async_playwright
 ROBOTICKET_URL = "https://bilety.lechpoznan.pl/"
 LECH_SCHEDULE_URL = "https://www.lechpoznan.pl/pierwsza-druzyna,61.html"
 OUT = Path("roboticket_discovery_artifacts_v01")
+MATRIX_PATH = OUT / "collector_matrix.json"
+UNRESOLVED_PATH = OUT / "unresolved_events.json"
 EVENT_ID_RE = re.compile(r"[?&]eventId=(\d+)", re.IGNORECASE)
 RESERVATION_RE = re.compile(r"eventReservationSelector\((\d+)\)")
 FIRST_TEAM_RE = re.compile(
     r"Kup bilet na wydarzenie(?: PREMIUM:)? Lech Poznań - (.+)",
     re.IGNORECASE,
 )
+WARSAW = ZoneInfo("Europe/Warsaw")
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.getenv("SUPABASE_SECRET_KEY", "")
+
+
+def normalize_space(value):
+    return re.sub(r"\s+", " ", value or "").strip()
 
 
 def event_id_from_url(url):
     try:
-        parsed = urlparse(url)
-        query = parse_qs(parsed.query)
+        query = parse_qs(urlparse(url).query)
         values = query.get("eventId") or query.get("eventid")
         if values and values[0].isdigit():
             return values[0]
@@ -33,72 +46,236 @@ def event_id_from_url(url):
     return match.group(1) if match else None
 
 
-def json_contains_event_marker(value):
-    if isinstance(value, dict):
-        for key, item in value.items():
-            key_l = str(key).lower()
-            if key_l in {"eventid", "event_id", "event", "events"}:
-                return True
-            if json_contains_event_marker(item):
-                return True
-    elif isinstance(value, list):
-        return any(json_contains_event_marker(item) for item in value[:100])
-    elif isinstance(value, str):
-        return "eventid=" in value.lower() or "/stadium" in value.lower()
-    return False
+def api_get_ticket_events():
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return []
+    query = parse.urlencode(
+        {
+            "provider": "eq.roboticket",
+            "select": "id,external_event_id,away_team,competition,match_date,kickoff_at",
+            "limit": "1000",
+        }
+    )
+    req = request.Request(
+        f"{SUPABASE_URL}/rest/v1/ticket_events?{query}",
+        headers={
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with request.urlopen(req, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8") or "[]")
+    except error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Supabase {exc.code}: {detail}") from exc
 
 
-def normalize_space(value):
-    return re.sub(r"\s+", " ", value or "").strip()
-
-
-def schedule_snippet(body_text, opponent, radius=700):
-    pos = body_text.lower().find(opponent.lower())
-    if pos < 0:
+def parse_schedule_fixture(item, opponent):
+    text = normalize_space(item.get("text"))
+    opponent_pattern = re.escape(opponent)
+    pattern = re.compile(
+        rf"(?P<day>\d{{2}})\s*\|\s*(?P<month>\d{{2}})\s*\|\s*(?P<year>\d{{4}})\s+"
+        rf"(?P<hour>\d{{2}}):(?P<minute>\d{{2}})\s+Lech Poznań\s+-:-\s+{opponent_pattern}(?:\s|$)",
+        re.IGNORECASE,
+    )
+    match = pattern.search(text)
+    if not match:
         return None
-    start = max(0, pos - radius)
-    end = min(len(body_text), pos + len(opponent) + radius)
-    return body_text[start:end]
+
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute"))
+    kickoff = datetime(
+        int(match.group("year")),
+        int(match.group("month")),
+        int(match.group("day")),
+        hour,
+        minute,
+        tzinfo=WARSAW,
+    )
+    competition_icon = next(
+        (
+            image.get("src")
+            for image in item.get("imgs", [])
+            if "rth_0x21_" in (image.get("src") or "")
+        ),
+        None,
+    )
+    return {
+        "match_date": kickoff.date().isoformat(),
+        "kickoff_at": kickoff.isoformat(),
+        "kickoff_placeholder": hour == 0 and minute == 0,
+        "competition_icon": competition_icon,
+        "schedule_text": text,
+    }
 
 
-async def schedule_dom_context(page, opponent):
-    return await page.evaluate(
+async def discover_roboticket(page):
+    response = await page.goto(
+        ROBOTICKET_URL,
+        wait_until="domcontentloaded",
+        timeout=90000,
+    )
+    if not response or response.status >= 400:
+        raise RuntimeError(
+            f"Roboticket discovery failed: HTTP {response.status if response else 'none'}"
+        )
+    await page.wait_for_timeout(8000)
+
+    boxes = await page.locator(".box").evaluate_all(
         r"""
-        opponent => {
-          const needle = opponent.toLowerCase();
-          const candidates = Array.from(document.querySelectorAll('*'))
-            .filter(el => {
-              const own = (el.innerText || '').replace(/\s+/g, ' ').trim();
-              return own.toLowerCase().includes(needle) && own.includes('Lech Poznań');
-            })
-            .map(el => {
-              const text = (el.innerText || '').replace(/\s+/g, ' ').trim();
-              const imgs = Array.from(el.querySelectorAll('img')).map(img => ({
+        els => els.map(box => ({
+            productid: box.getAttribute('productid') || '',
+            controls: Array.from(box.querySelectorAll('a,button')).map(el => ({
+                className: typeof el.className === 'string' ? el.className : '',
+                href: el.getAttribute('href') || '',
+                onclick: el.getAttribute('onclick') || '',
+                aria: el.getAttribute('aria-label') || ''
+            }))
+        }))
+        """
+    )
+
+    events = {}
+    for box in boxes:
+        for control in box.get("controls", []):
+            if "btn-buy" not in (control.get("className") or ""):
+                continue
+            aria = normalize_space(control.get("aria"))
+            match = FIRST_TEAM_RE.fullmatch(aria)
+            if not match or "PREMIUM:" in aria.upper():
+                continue
+
+            opponent = normalize_space(match.group(1))
+            event_id = event_id_from_url(control.get("href") or "")
+            if not event_id:
+                reservation = RESERVATION_RE.search(control.get("onclick") or "")
+                if reservation:
+                    event_id = reservation.group(1)
+            if not event_id and str(box.get("productid", "")).isdigit():
+                event_id = str(box["productid"])
+            if not event_id:
+                continue
+
+            href = control.get("href") or ""
+            event_url = (
+                urljoin(ROBOTICKET_URL, href)
+                if href
+                else f"https://bilety.lechpoznan.pl/Stadium?eventId={event_id}"
+            )
+            events[event_id] = {
+                "id": event_id,
+                "provider": "roboticket",
+                "home_team": "Lech Poznań",
+                "away_team": opponent,
+                "url": event_url,
+            }
+
+    return sorted(events.values(), key=lambda row: int(row["id"]))
+
+
+async def load_schedule_items(page):
+    response = await page.goto(
+        LECH_SCHEDULE_URL,
+        wait_until="domcontentloaded",
+        timeout=90000,
+    )
+    if not response or response.status >= 400:
+        raise RuntimeError(
+            f"Official schedule discovery failed: HTTP {response.status if response else 'none'}"
+        )
+    await page.wait_for_timeout(4000)
+    return await page.locator(".Item").evaluate_all(
+        r"""
+        els => els.map(el => ({
+            text: (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim(),
+            imgs: Array.from(el.querySelectorAll('img')).map(img => ({
                 src: img.getAttribute('src') || '',
                 alt: img.getAttribute('alt') || '',
                 title: img.getAttribute('title') || ''
-              }));
-              return {
-                tag: el.tagName || '',
-                className: typeof el.className === 'string' ? el.className : '',
-                id: el.id || '',
-                text: text.slice(0, 1500),
-                html: (el.outerHTML || '').slice(0, 10000),
-                imgs
-              };
-            })
-            .sort((a, b) => a.text.length - b.text.length);
-          return candidates.slice(0, 8);
-        }
-        """,
-        opponent,
+            }))
+        }))
+        """
     )
+
+
+def match_schedule(events, schedule_items):
+    resolved = []
+    unresolved = []
+    for event in events:
+        matches = []
+        for item in schedule_items:
+            fixture = parse_schedule_fixture(item, event["away_team"])
+            if fixture:
+                matches.append(fixture)
+        if len(matches) != 1:
+            unresolved.append(
+                {
+                    **event,
+                    "reason": "schedule_match_not_unique",
+                    "schedule_match_count": len(matches),
+                }
+            )
+            continue
+        fixture = matches[0]
+        if fixture["kickoff_placeholder"]:
+            unresolved.append(
+                {
+                    **event,
+                    **fixture,
+                    "reason": "kickoff_is_placeholder_00_00",
+                }
+            )
+            continue
+        resolved.append({**event, **fixture})
+    return resolved, unresolved
+
+
+def apply_competition_mapping(resolved, existing_events):
+    existing_by_id = {
+        str(row.get("external_event_id")): row
+        for row in existing_events
+        if row.get("external_event_id") is not None
+    }
+    icon_to_competitions = {}
+
+    for event in resolved:
+        existing = existing_by_id.get(event["id"])
+        competition = (existing or {}).get("competition")
+        icon = event.get("competition_icon")
+        if competition and icon:
+            icon_to_competitions.setdefault(icon, set()).add(competition)
+
+    icon_map = {
+        icon: next(iter(values))
+        for icon, values in icon_to_competitions.items()
+        if len(values) == 1
+    }
+
+    matrix = []
+    for event in resolved:
+        competition = icon_map.get(event.get("competition_icon"))
+        matrix.append(
+            {
+                "id": event["id"],
+                "provider": "roboticket",
+                "home_team": event["home_team"],
+                "away_team": event["away_team"],
+                "competition": competition or "",
+                "match_date": event["match_date"],
+                "kickoff_at": event["kickoff_at"],
+                "mapping_source": "roboticket_homepage+lech_official_schedule_live",
+                "mapping_confidence": "confirmed",
+                "url": event["url"],
+            }
+        )
+    return matrix, icon_map
 
 
 async def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    captured_json = []
-    response_index = []
+    existing_events = api_get_ticket_events()
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -110,187 +287,44 @@ async def main():
             locale="pl-PL",
             timezone_id="Europe/Warsaw",
         )
-        page = await context.new_page()
-
-        async def handle_response(response):
-            content_type = (response.headers.get("content-type") or "").lower()
-            url = response.url
-            if "json" not in content_type and not any(
-                token in url.lower() for token in ("event", "stadium", "sale", "offer")
-            ):
-                return
-            response_index.append(
-                {"status": response.status, "url": url, "content_type": content_type}
-            )
-            if "json" not in content_type:
-                return
-            try:
-                payload = await response.json()
-            except Exception:
-                return
-            if json_contains_event_marker(payload):
-                captured_json.append(
-                    {"status": response.status, "url": url, "payload": payload}
-                )
-
-        page.on("response", handle_response)
-
-        print(f"Opening Roboticket: {ROBOTICKET_URL}")
-        response = await page.goto(
-            ROBOTICKET_URL,
-            wait_until="domcontentloaded",
-            timeout=90000,
-        )
-        print("Roboticket status:", response.status if response else "none")
-        await page.wait_for_timeout(8000)
-
-        boxes = await page.locator(".box").evaluate_all(
-            r"""
-            els => els.map(box => ({
-                productid: box.getAttribute('productid') || '',
-                productlistid: box.getAttribute('productlistid') || '',
-                producttype: box.getAttribute('producttype') || '',
-                bannertype: box.getAttribute('bannertype') || '',
-                html: (box.outerHTML || '').slice(0, 9000),
-                controls: Array.from(box.querySelectorAll('a,button')).map(el => ({
-                    tag: el.tagName || '',
-                    className: typeof el.className === 'string' ? el.className : '',
-                    href: el.getAttribute('href') || '',
-                    onclick: el.getAttribute('onclick') || '',
-                    aria: el.getAttribute('aria-label') || '',
-                    title: el.getAttribute('title') || '',
-                    text: (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim()
-                }))
-            }))
-            """
-        )
-
-        discovered = []
-        normal_first_team = []
-        for box in boxes:
-            buy_controls = [
-                c for c in box.get("controls", [])
-                if "btn-buy" in (c.get("className") or "")
-                and "Kup bilet na wydarzenie" in (c.get("aria") or "")
-            ]
-            for control in buy_controls:
-                aria = normalize_space(control.get("aria"))
-                match = FIRST_TEAM_RE.fullmatch(aria)
-                is_first_team = bool(match)
-                opponent = normalize_space(match.group(1)) if match else None
-                is_premium = "PREMIUM:" in aria.upper()
-
-                event_id = event_id_from_url(control.get("href") or "")
-                if not event_id:
-                    reservation = RESERVATION_RE.search(control.get("onclick") or "")
-                    if reservation:
-                        event_id = reservation.group(1)
-                if not event_id and str(box.get("productid", "")).isdigit():
-                    event_id = str(box["productid"])
-                if not event_id:
-                    continue
-
-                href = control.get("href") or ""
-                if href:
-                    event_url = urljoin(ROBOTICKET_URL, href)
-                else:
-                    event_url = f"https://bilety.lechpoznan.pl/Stadium?eventId={event_id}"
-
-                row = {
-                    "event_id": event_id,
-                    "event_url": event_url,
-                    "aria": aria,
-                    "opponent": opponent,
-                    "is_first_team": is_first_team,
-                    "is_premium": is_premium,
-                    "discovery_mode": "href" if href else "eventReservationSelector",
-                    "productid": box.get("productid"),
-                    "productlistid": box.get("productlistid"),
-                    "producttype": box.get("producttype"),
-                    "bannertype": box.get("bannertype"),
-                }
-                discovered.append(row)
-                if is_first_team and not is_premium:
-                    normal_first_team.append(row)
-
-        normal_first_team = sorted(
-            {row["event_id"]: row for row in normal_first_team}.values(),
-            key=lambda x: int(x["event_id"]),
-        )
-        discovered = sorted(discovered, key=lambda x: int(x["event_id"]))
-
-        (OUT / "roboticket_boxes.json").write_text(
-            json.dumps(boxes, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        (OUT / "discovered_buy_events.json").write_text(
-            json.dumps(discovered, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        (OUT / "normal_first_team_events.json").write_text(
-            json.dumps(normal_first_team, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        (OUT / "captured_event_json.json").write_text(
-            json.dumps(captured_json, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        (OUT / "response_index.json").write_text(
-            json.dumps(response_index, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-
-        print("Normal first-team Roboticket events:")
-        for row in normal_first_team:
-            print(
-                f"  {row['event_id']} | {row['opponent']} | "
-                f"{row['discovery_mode']} | {row['event_url']}"
-            )
-
+        roboticket_page = await context.new_page()
         schedule_page = await context.new_page()
-        print(f"Opening official Lech schedule: {LECH_SCHEDULE_URL}")
-        schedule_response = await schedule_page.goto(
-            LECH_SCHEDULE_URL,
-            wait_until="domcontentloaded",
-            timeout=90000,
+
+        events = await discover_roboticket(roboticket_page)
+        schedule_items = await load_schedule_items(schedule_page)
+        resolved, unresolved = match_schedule(events, schedule_items)
+        matrix, icon_map = apply_competition_mapping(resolved, existing_events)
+
+        MATRIX_PATH.write_text(
+            json.dumps(matrix, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
         )
-        print("Schedule status:", schedule_response.status if schedule_response else "none")
-        await schedule_page.wait_for_timeout(4000)
-        schedule_body = await schedule_page.locator("body").inner_text()
-        (OUT / "official_lech_schedule_body.txt").write_text(
-            schedule_body,
+        UNRESOLVED_PATH.write_text(
+            json.dumps(unresolved, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (OUT / "competition_icon_map.json").write_text(
+            json.dumps(icon_map, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (OUT / "resolved_events.json").write_text(
+            json.dumps(resolved, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
-        snippets = {}
-        dom_contexts = {}
-        for row in normal_first_team:
-            opponent = row.get("opponent")
-            if not opponent:
-                continue
-            snippet = schedule_snippet(schedule_body, opponent)
-            dom_ctx = await schedule_dom_context(schedule_page, opponent)
-            snippets[row["event_id"]] = {
-                "opponent": opponent,
-                "found": snippet is not None,
-                "snippet": snippet,
-            }
-            dom_contexts[row["event_id"]] = dom_ctx
-            print(f"Official schedule context for {row['event_id']} / {opponent}:")
-            print(normalize_space(snippet)[:700] if snippet else "  NOT FOUND")
-            if dom_ctx:
-                best = dom_ctx[0]
-                print(
-                    "DOM candidate: "
-                    f"tag={best.get('tag')} class={best.get('className')} "
-                    f"id={best.get('id')} imgs={best.get('imgs')}"
-                )
-                print(f"DOM HTML: {best.get('html', '')[:2500]}")
-
-        (OUT / "official_schedule_snippets.json").write_text(
-            json.dumps(snippets, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        (OUT / "official_schedule_dom_context.json").write_text(
-            json.dumps(dom_contexts, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-
-        print(f"Candidate JSON responses: {len(captured_json)}")
-        print(f"Indexed responses: {len(response_index)}")
+        print(f"Roboticket first-team normal events: {len(events)}")
+        print(f"Resolved for collection: {len(matrix)}")
+        print(f"Unresolved/skipped: {len(unresolved)}")
+        for event in matrix:
+            print(
+                f"  {event['id']} | {event['away_team']} | "
+                f"{event['kickoff_at']} | {event['competition'] or 'competition unresolved'}"
+            )
+        for event in unresolved:
+            print(
+                f"SKIP {event['id']} | {event['away_team']} | {event['reason']}"
+            )
+        print(f"MATRIX_JSON={MATRIX_PATH.read_text(encoding='utf-8')}")
         print("SUCCESS")
         await browser.close()
 
