@@ -13,6 +13,7 @@ on:
       - main
     paths:
       - sync_league_attendance_outcomes_v01.py
+      - test_league_attendance_outcomes_v01.py
       - evaluate_forecast_horizons_v01.py
       - .github/workflows/sync-league-attendance-outcomes-v01.yml
   push:
@@ -20,6 +21,7 @@ on:
       - agent/auto-outcomes-v01
     paths:
       - sync_league_attendance_outcomes_v01.py
+      - test_league_attendance_outcomes_v01.py
       - .github/workflows/sync-league-attendance-outcomes-v01.yml
   schedule:
     - cron: "17 */6 * * *"
@@ -54,6 +56,9 @@ jobs:
 
       - name: Install dependencies
         run: pip install requests beautifulsoup4
+
+      - name: Run parser contract tests
+        run: python test_league_attendance_outcomes_v01.py
 
       - name: Sync completed league outcomes
         id: sync
