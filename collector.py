@@ -69,12 +69,11 @@ def validate_event_metadata():
 
 
 def event_metadata_payload():
-    return {
+    payload = {
         "provider": EVENT_PROVIDER,
         "external_event_id": str(EVENT_ID),
         "home_team": EVENT_HOME_TEAM,
         "away_team": EVENT_AWAY_TEAM,
-        "competition": EVENT_COMPETITION,
         "match_date": EVENT_MATCH_DATE,
         "kickoff_at": EVENT_KICKOFF_AT,
         "source_url": EVENT_URL,
@@ -82,6 +81,9 @@ def event_metadata_payload():
         "mapping_confidence": EVENT_MAPPING_CONFIDENCE,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if EVENT_COMPETITION:
+        payload["competition"] = EVENT_COMPETITION
+    return payload
 
 
 def resolve_or_create_ticket_event():
