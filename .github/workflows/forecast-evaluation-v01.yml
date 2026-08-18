@@ -7,6 +7,14 @@ on:
         description: "Optional Roboticket event id; leave empty to evaluate all confirmed outcomes"
         required: false
         type: string
+  pull_request:
+    branches:
+      - main
+    paths:
+      - evaluate_forecast_horizons_v01.py
+      - test_forecast_evaluation_v01.py
+      - sql/ticket_event_outcomes_v01.sql
+      - .github/workflows/forecast-evaluation-v01.yml
   push:
     branches:
       - agent/forecast-evaluation-v01
