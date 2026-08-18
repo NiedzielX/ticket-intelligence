@@ -15,6 +15,8 @@ on:
       - sync_league_attendance_outcomes_v01.py
       - test_league_attendance_outcomes_v01.py
       - evaluate_forecast_horizons_v01.py
+      - build_calibration_report_v01.py
+      - test_calibration_report_v01.py
       - .github/workflows/sync-league-attendance-outcomes-v01.yml
   push:
     branches:
@@ -22,6 +24,8 @@ on:
     paths:
       - sync_league_attendance_outcomes_v01.py
       - test_league_attendance_outcomes_v01.py
+      - build_calibration_report_v01.py
+      - test_calibration_report_v01.py
       - .github/workflows/sync-league-attendance-outcomes-v01.yml
   schedule:
     - cron: "17 */6 * * *"
@@ -60,6 +64,9 @@ jobs:
       - name: Run parser contract tests
         run: python test_league_attendance_outcomes_v01.py
 
+      - name: Run calibration report tests
+        run: python test_calibration_report_v01.py
+
       - name: Sync completed league outcomes
         id: sync
         run: |
@@ -71,6 +78,10 @@ jobs:
         if: env.DRY_RUN != 'true' && steps.sync.outputs.new_count != '0'
         run: python evaluate_forecast_horizons_v01.py
 
+      - name: Build calibration report
+        if: env.DRY_RUN != 'true' && steps.sync.outputs.new_count != '0'
+        run: python build_calibration_report_v01.py
+
       - name: Upload outcome sync artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -79,5 +90,6 @@ jobs:
           path: |
             attendance_outcome_artifacts_v01/
             forecast_evaluation_artifacts_v01/
+            calibration_report_artifacts_v01/
           if-no-files-found: ignore
           retention-days: 90

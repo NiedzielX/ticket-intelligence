@@ -1,0 +1,82 @@
+name: Calibration Report v0.1
+
+on:
+  workflow_dispatch:
+    inputs:
+      event_id:
+        description: "Optional Roboticket event id; leave empty for all confirmed outcomes"
+        required: false
+        type: string
+  pull_request:
+    branches:
+      - main
+    paths:
+      - build_calibration_report_v01.py
+      - test_calibration_report_v01.py
+      - evaluate_forecast_horizons_v01.py
+      - .github/workflows/calibration-report-v01.yml
+      - .github/workflows/forecast-evaluation-v01.yml
+      - .github/workflows/record-ticket-outcome-v01.yml
+      - .github/workflows/sync-league-attendance-outcomes-v01.yml
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile calibration report
+        run: python -m py_compile build_calibration_report_v01.py
+
+      - name: Run calibration report tests
+        run: python test_calibration_report_v01.py
+
+  build-report:
+    if: github.event_name == 'workflow_dispatch'
+    needs: self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EVENT_ID: ${{ inputs.event_id }}
+      EVENT_PROVIDER: "roboticket"
+      EVALUATION_HORIZONS_HOURS: "336,168,72,48,24"
+      HORIZON_MAX_EARLY_GAP_HOURS: "2.5"
+      MIN_CALIBRATION_EVENTS: "7"
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Evaluate forecast horizons
+        run: python evaluate_forecast_horizons_v01.py
+
+      - name: Build calibration report
+        run: python build_calibration_report_v01.py
+
+      - name: Upload calibration report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibration-report-v0-1
+          path: |
+            forecast_evaluation_artifacts_v01/
+            calibration_report_artifacts_v01/
+          if-no-files-found: ignore
+          retention-days: 90

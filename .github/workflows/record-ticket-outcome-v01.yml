@@ -56,10 +56,16 @@ jobs:
       - name: Evaluate forecast horizons
         run: python evaluate_forecast_horizons_v01.py
 
-      - name: Upload evaluation artifact
+      - name: Build calibration report
+        run: python build_calibration_report_v01.py
+
+      - name: Upload evaluation and calibration artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: forecast-evaluation-v0-1-${{ inputs.event_id }}
-          path: forecast_evaluation_artifacts_v01/
+          path: |
+            forecast_evaluation_artifacts_v01/
+            calibration_report_artifacts_v01/
+          if-no-files-found: ignore
           retention-days: 90
