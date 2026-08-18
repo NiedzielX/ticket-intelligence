@@ -1,0 +1,70 @@
+name: Forecast Evaluation v0.1
+
+on:
+  workflow_dispatch:
+    inputs:
+      event_id:
+        description: "Optional Roboticket event id; leave empty to evaluate all confirmed outcomes"
+        required: false
+        type: string
+  push:
+    branches:
+      - agent/forecast-evaluation-v01
+    paths:
+      - evaluate_forecast_horizons_v01.py
+      - test_forecast_evaluation_v01.py
+      - sql/ticket_event_outcomes_v01.sql
+      - .github/workflows/forecast-evaluation-v01.yml
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run evaluation self-test
+        run: python test_forecast_evaluation_v01.py
+
+  evaluate:
+    if: github.event_name == 'workflow_dispatch'
+    needs: self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EVENT_ID: ${{ inputs.event_id }}
+      EVENT_PROVIDER: "roboticket"
+      EVALUATION_HORIZONS_HOURS: "336,168,72,48,24"
+      HORIZON_MAX_EARLY_GAP_HOURS: "2.5"
+      MIN_CALIBRATION_EVENTS: "7"
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Evaluate forecast horizons
+        run: python evaluate_forecast_horizons_v01.py
+
+      - name: Upload evaluation artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forecast-evaluation-v0-1
+          path: forecast_evaluation_artifacts_v01/
+          retention-days: 90
