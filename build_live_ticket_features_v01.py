@@ -75,18 +75,65 @@ def parse_timestamp(value):
 
 
 def load_snapshot_context(ticket_event_id):
-    query = parse.urlencode(
+    event_query = parse.urlencode(
+        {
+            "id": f"eq.{ticket_event_id}",
+            "select": "id,provider,external_event_id,home_team,away_team,competition,match_date,kickoff_at",
+        }
+    )
+    event_rows = api_get_all(f"ticket_events?{event_query}")
+    if len(event_rows) != 1:
+        raise RuntimeError(
+            f"Expected one ticket event for id={ticket_event_id}; found {len(event_rows)}."
+        )
+    event = event_rows[0]
+
+    snapshot_query = parse.urlencode(
         {
             "ticket_event_id": f"eq.{ticket_event_id}",
             "select": (
-                "snapshot_id,captured_at,ticket_event_id,provider,external_event_id,"
-                "home_team,away_team,competition,match_date,kickoff_at,"
-                "hours_to_kickoff,days_to_match"
+                "id,captured_at,ticket_event_id,"
+                "event_match_date_at_capture,event_kickoff_at_capture"
             ),
             "order": "captured_at.asc",
         }
     )
-    return api_get_all(f"live_event_context?{query}")
+    snapshots = api_get_all(f"snapshots?{snapshot_query}")
+    context = []
+
+    for snapshot in snapshots:
+        captured_at = parse_timestamp(snapshot.get("captured_at"))
+        kickoff_value = snapshot.get("event_kickoff_at_capture") or event.get("kickoff_at")
+        match_date = snapshot.get("event_match_date_at_capture") or event.get("match_date")
+        kickoff_at = parse_timestamp(kickoff_value)
+
+        if captured_at is None:
+            continue
+
+        hours_to_kickoff = None
+        days_to_match = None
+        if kickoff_at is not None:
+            hours_to_kickoff = (kickoff_at - captured_at).total_seconds() / 3600.0
+            days_to_match = hours_to_kickoff / 24.0
+
+        context.append(
+            {
+                "snapshot_id": int(snapshot["id"]),
+                "captured_at": snapshot["captured_at"],
+                "ticket_event_id": int(snapshot["ticket_event_id"]),
+                "provider": event["provider"],
+                "external_event_id": event["external_event_id"],
+                "home_team": event["home_team"],
+                "away_team": event["away_team"],
+                "competition": event.get("competition"),
+                "match_date": match_date,
+                "kickoff_at": kickoff_value,
+                "hours_to_kickoff": hours_to_kickoff,
+                "days_to_match": days_to_match,
+            }
+        )
+
+    return context
 
 
 def load_inventory(snapshot_ids):

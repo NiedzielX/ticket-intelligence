@@ -4,7 +4,8 @@ import asyncio
 import json
 import os
 from datetime import datetime, timezone
-from urllib import request, error
+from pathlib import Path
+from urllib import error, request
 from urllib.parse import urlencode, urlparse
 
 from playwright.async_api import async_playwright
@@ -15,11 +16,12 @@ EVENT_URL = os.environ["ROBOTICKET_URL"]
 EVENT_PROVIDER = os.getenv("EVENT_PROVIDER", "roboticket")
 EVENT_HOME_TEAM = os.getenv("EVENT_HOME_TEAM")
 EVENT_AWAY_TEAM = os.getenv("EVENT_AWAY_TEAM")
-EVENT_COMPETITION = os.getenv("EVENT_COMPETITION")
+EVENT_COMPETITION = os.getenv("EVENT_COMPETITION") or None
 EVENT_MATCH_DATE = os.getenv("EVENT_MATCH_DATE")
 EVENT_KICKOFF_AT = os.getenv("EVENT_KICKOFF_AT")
 EVENT_MAPPING_SOURCE = os.getenv("EVENT_MAPPING_SOURCE")
 EVENT_MAPPING_CONFIDENCE = os.getenv("EVENT_MAPPING_CONFIDENCE", "high")
+RESULT_DIR = Path(os.getenv("COLLECTOR_RESULT_DIR", "collector_results_v01"))
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
@@ -58,7 +60,6 @@ def validate_event_metadata():
     required = {
         "EVENT_HOME_TEAM": EVENT_HOME_TEAM,
         "EVENT_AWAY_TEAM": EVENT_AWAY_TEAM,
-        "EVENT_COMPETITION": EVENT_COMPETITION,
         "EVENT_MATCH_DATE": EVENT_MATCH_DATE,
         "EVENT_KICKOFF_AT": EVENT_KICKOFF_AT,
     }
@@ -70,12 +71,11 @@ def validate_event_metadata():
 
 
 def event_metadata_payload():
-    return {
+    payload = {
         "provider": EVENT_PROVIDER,
         "external_event_id": str(EVENT_ID),
         "home_team": EVENT_HOME_TEAM,
         "away_team": EVENT_AWAY_TEAM,
-        "competition": EVENT_COMPETITION,
         "match_date": EVENT_MATCH_DATE,
         "kickoff_at": EVENT_KICKOFF_AT,
         "source_url": EVENT_URL,
@@ -83,6 +83,9 @@ def event_metadata_payload():
         "mapping_confidence": EVENT_MAPPING_CONFIDENCE,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if EVENT_COMPETITION:
+        payload["competition"] = EVENT_COMPETITION
+    return payload
 
 
 def resolve_or_create_ticket_event():
@@ -131,18 +134,26 @@ def resolve_or_create_ticket_event():
     return created[0]
 
 
-def create_snapshot(ticket_event_id):
+def create_snapshot(event_metadata):
     result = api(
         "snapshots",
         "POST",
         {
             "event_id": None,
             "source": EVENT_PROVIDER,
-            "ticket_event_id": ticket_event_id,
+            "ticket_event_id": event_metadata["id"],
+            "event_match_date_at_capture": event_metadata["match_date"],
+            "event_kickoff_at_capture": event_metadata["kickoff_at"],
         },
         "return=representation",
     )
-    return result[0]["id"]
+    if not result or len(result) != 1:
+        raise RuntimeError("Failed to create snapshot.")
+    return int(result[0]["id"])
+
+
+def delete_snapshot(snapshot_id):
+    api(f"snapshots?id=eq.{snapshot_id}", "DELETE")
 
 
 def parse_sector_inventory(data):
@@ -171,6 +182,28 @@ def insert_sector_inventory(snapshot_id, sectors):
     ]
     api("sector_inventory", "POST", rows)
     return len(rows)
+
+
+def write_result(event_metadata, snapshot_id, sector_count, total_available):
+    RESULT_DIR.mkdir(parents=True, exist_ok=True)
+    path = RESULT_DIR / f"event_{EVENT_ID}_collector_result_v01.json"
+    payload = {
+        "provider_event_id": str(EVENT_ID),
+        "ticket_event_id": int(event_metadata["id"]),
+        "snapshot_id": int(snapshot_id),
+        "home_team": event_metadata.get("home_team"),
+        "away_team": event_metadata.get("away_team"),
+        "competition": event_metadata.get("competition"),
+        "match_date": event_metadata.get("match_date"),
+        "kickoff_at": event_metadata.get("kickoff_at"),
+        "sector_count": int(sector_count),
+        "available_total": int(total_available),
+    }
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return path
 
 
 async def login_if_required(page):
@@ -292,14 +325,33 @@ async def main():
         )
         print("Event kickoff:", event_metadata["kickoff_at"])
 
-        snapshot_id = create_snapshot(ticket_event_id)
-        inserted = insert_sector_inventory(snapshot_id, sectors)
+        snapshot_id = create_snapshot(event_metadata)
+        try:
+            inserted = insert_sector_inventory(snapshot_id, sectors)
+        except Exception:
+            try:
+                delete_snapshot(snapshot_id)
+                print(f"Deleted orphan snapshot {snapshot_id} after inventory failure.")
+            except Exception as cleanup_error:
+                print(
+                    f"WARNING: failed to delete orphan snapshot {snapshot_id}: "
+                    f"{cleanup_error}"
+                )
+            raise
+
         total_available = sum(available for _, available in sectors)
+        result_path = write_result(
+            event_metadata,
+            snapshot_id,
+            inserted,
+            total_available,
+        )
 
         print("")
         print(f"Created snapshot {snapshot_id}")
         print(f"Inserted {inserted} sector records")
         print(f"Total available seats: {total_available}")
+        print(f"Collector result: {result_path}")
         print("")
         print("SUCCESS")
 
