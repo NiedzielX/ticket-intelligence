@@ -4,9 +4,11 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - agent/live-ticket-features-v01
+      - agent/auto-event-onboarding-v01
     paths:
+      - build_active_ticket_event_matrix_v01.py
       - build_live_ticket_features_v01.py
+      - sql/snapshot_event_context_v01.sql
       - .github/workflows/live-ticket-features-v01.yml
   schedule:
     - cron: "25 * * * *"
@@ -15,19 +17,50 @@ permissions:
   contents: read
 
 jobs:
+  active-events:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      event_count: ${{ steps.matrix.outputs.event_count }}
+    env:
+      EVENT_PROVIDER: "roboticket"
+      EVENT_HOME_TEAM: "Lech Poznań"
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build active event matrix
+        run: python build_active_ticket_event_matrix_v01.py
+
+      - name: Publish active event matrix
+        id: matrix
+        run: |
+          MATRIX=$(cat active_ticket_event_matrix.json)
+          COUNT=$(python -c "import json; print(len(json.load(open('active_ticket_event_matrix.json'))))")
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "event_count=$COUNT" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: active-events
+    if: needs.active-events.outputs.event_count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     strategy:
       fail-fast: false
       matrix:
-        event_id:
-          - "10069"
-          - "10102"
+        event: ${{ fromJSON(needs.active-events.outputs.matrix) }}
 
     env:
-      EVENT_ID: ${{ matrix.event_id }}
+      EVENT_ID: ${{ matrix.event.id }}
       EVENT_PROVIDER: "roboticket"
       TRANSIENT_JUMP_THRESHOLD: "500"
       TRANSIENT_RETURN_TOLERANCE: "100"
@@ -50,6 +83,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: live-ticket-features-v0-1-${{ matrix.event_id }}
+          name: live-ticket-features-v0-1-${{ matrix.event.id }}
           path: live_ticket_artifacts_v01/
           retention-days: 30
