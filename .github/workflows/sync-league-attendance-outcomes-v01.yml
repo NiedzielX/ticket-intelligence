@@ -1,0 +1,83 @@
+name: Sync League Attendance Outcomes v0.1
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Parse and match without writing outcomes"
+        required: false
+        default: false
+        type: boolean
+  pull_request:
+    branches:
+      - main
+    paths:
+      - sync_league_attendance_outcomes_v01.py
+      - test_league_attendance_outcomes_v01.py
+      - evaluate_forecast_horizons_v01.py
+      - .github/workflows/sync-league-attendance-outcomes-v01.yml
+  push:
+    branches:
+      - main
+    paths:
+      - sync_league_attendance_outcomes_v01.py
+      - test_league_attendance_outcomes_v01.py
+      - .github/workflows/sync-league-attendance-outcomes-v01.yml
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EVENT_PROVIDER: "roboticket"
+      EVENT_HOME_TEAM: "Lech Poznań"
+      STADIUM_CAPACITY: "43269"
+      MIN_POST_KICKOFF_HOURS: "2"
+      DRY_RUN: ${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.dry_run)) && 'true' || 'false' }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      EVALUATION_HORIZONS_HOURS: "336,168,72,48,24"
+      HORIZON_MAX_EARLY_GAP_HOURS: "2.5"
+      MIN_CALIBRATION_EVENTS: "7"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Run parser contract tests
+        run: python test_league_attendance_outcomes_v01.py
+
+      - name: Sync completed league outcomes
+        id: sync
+        run: |
+          python sync_league_attendance_outcomes_v01.py
+          NEW_COUNT=$(python -c "import json; print(json.load(open('attendance_outcome_artifacts_v01/league_attendance_outcome_sync_v01.json'))['new_outcome_count'])")
+          echo "new_count=$NEW_COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Evaluate newly available outcomes
+        if: env.DRY_RUN != 'true' && steps.sync.outputs.new_count != '0'
+        run: python evaluate_forecast_horizons_v01.py
+
+      - name: Upload outcome sync artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: league-attendance-outcome-sync-v0-1
+          path: |
+            attendance_outcome_artifacts_v01/
+            forecast_evaluation_artifacts_v01/
+          if-no-files-found: ignore
+          retention-days: 90
