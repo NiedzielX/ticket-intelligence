@@ -131,3 +131,58 @@ jobs:
             calibration_report_artifacts_v01/
           if-no-files-found: ignore
           retention-days: 90
+
+  thun-outcome-oneoff:
+    if: github.event_name == 'pull_request' && github.head_ref == 'agent/thun-outcome-20260820'
+    needs: [self-test, schema-probe]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EVENT_ID: "10102"
+      EVENT_PROVIDER: "roboticket"
+      ACTUAL_ATTENDANCE: "22241"
+      OUTCOME_SOURCE_NAME: "PAP via RMF24"
+      OUTCOME_SOURCE_URL: "https://www.rmf24.pl/fakty/sport/news-pogrom-w-poznaniu-lech-rozbil-fc-thun-i-ustanowil-rekord,nIdn,1014527"
+      ATTENDANCE_DEFINITION: "reported_match_attendance"
+      MAX_ATTENDANCE: "43269"
+      EVALUATION_HORIZONS_HOURS: "336,168,72,48,24"
+      HORIZON_MAX_EARLY_GAP_HOURS: "2.5"
+      MIN_CALIBRATION_EVENTS: "7"
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Record Thun reported attendance
+        run: python record_ticket_event_outcome_v01.py
+
+      - name: Evaluate Thun forecast horizons
+        run: python evaluate_forecast_horizons_v01.py
+
+      - name: Build Thun calibration report
+        run: python build_calibration_report_v01.py
+
+      - name: Print calibration report
+        run: |
+          echo '--- calibration_report_v01.md ---'
+          cat calibration_report_artifacts_v01/calibration_report_v01.md
+          echo '--- forecast_horizon_evaluation_v01.csv ---'
+          cat forecast_evaluation_artifacts_v01/forecast_horizon_evaluation_v01.csv
+
+      - name: Upload Thun evaluation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: thun-calibration-2026-08-20
+          path: |
+            forecast_evaluation_artifacts_v01/
+            calibration_report_artifacts_v01/
+          if-no-files-found: ignore
+          retention-days: 90
