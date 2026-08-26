@@ -23,6 +23,7 @@
   },
   "vars": {
     "EVENT_PROVIDER": "roboticket",
-    "EVENT_HOME_TEAM": "Lech Poznań"
+    "EVENT_HOME_TEAM": "Lech Poznań",
+    "SUPABASE_URL": "https://oyuyuyphugcsyqsfsulv.supabase.co"
   }
 }
