@@ -25,7 +25,8 @@ type Sector = {
   available: number;
 };
 
-const ROBOTICKET_BASE_URL = "https://bilety.lechpoznan.pl/Stadium";
+const ROBOTICKET_ORIGIN = "https://bilety.lechpoznan.pl";
+const ROBOTICKET_BASE_URL = `${ROBOTICKET_ORIGIN}/Stadium`;
 const SECTOR_INFO_ENDPOINT = "GetWGLSectorsInfo";
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
@@ -102,9 +103,16 @@ async function fetchSectorInfo(page: any, event: TicketEvent): Promise<any> {
     timeout: 30000,
   });
 
+  const finalUrl = page.url();
   console.log(
-    `Browser page ready for ${event.external_event_id}: status=${navigation?.status() ?? "unknown"}, finalUrl=${page.url()}`,
+    `Browser page ready for ${event.external_event_id}: status=${navigation?.status() ?? "unknown"}, finalUrl=${finalUrl}`,
   );
+
+  if (!finalUrl.startsWith(ROBOTICKET_ORIGIN)) {
+    throw new Error(
+      `Roboticket browser navigation left ticket host for ${event.external_event_id}: ${finalUrl}`,
+    );
+  }
 
   await page.waitForTimeout(750);
 
