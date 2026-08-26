@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "beyond-ticketing-emergency-collector",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-26",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "browser": {
+    "binding": "BROWSER"
+  },
+  "triggers": {
+    "crons": ["13 */2 * * *"]
+  },
+  "vars": {
+    "EVENT_PROVIDER": "roboticket",
+    "EVENT_HOME_TEAM": "Lech Poznań"
+  }
+}
