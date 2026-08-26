@@ -8,9 +8,6 @@
   "browser": {
     "binding": "BROWSER"
   },
-  "triggers": {
-    "crons": ["*/5 * * * *"]
-  },
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1,
