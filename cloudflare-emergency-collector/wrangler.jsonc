@@ -9,7 +9,7 @@
     "binding": "BROWSER"
   },
   "triggers": {
-    "crons": ["13 */2 * * *"]
+    "crons": ["*/5 * * * *"]
   },
   "observability": {
     "enabled": true,
