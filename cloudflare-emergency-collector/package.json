@@ -1,0 +1,13 @@
+{
+  "name": "beyond-ticketing-cloudflare-emergency-collector",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev --remote --test-scheduled"
+  },
+  "devDependencies": {
+    "@cloudflare/playwright": "^1.3.0",
+    "wrangler": "^4.0.0"
+  }
+}
