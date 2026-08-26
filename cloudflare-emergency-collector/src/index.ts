@@ -189,6 +189,15 @@ async function collectEvent(browser: any, env: Env, event: TicketEvent): Promise
   page.on("response", async (response: any) => {
     if (!response.url().includes(SECTOR_INFO_ENDPOINT)) return;
     try {
+      const request = response.request();
+      console.log(
+        `SECTOR_ENDPOINT ${JSON.stringify({
+          provider_event_id: event.external_event_id,
+          url: response.url(),
+          method: request.method(),
+          post_data: request.postData() || null,
+        })}`,
+      );
       sectorData = await response.json();
       console.log(
         `Captured sector response for ${event.external_event_id}: ${response.status()}`,
@@ -260,7 +269,8 @@ async function runCollector(env: Env): Promise<any> {
   const failures: any[] = [];
 
   try {
-    for (const event of events) {
+    // Diagnostic run only needs one event to discover the underlying Roboticket API call.
+    for (const event of events.slice(0, 1)) {
       try {
         results.push(await collectEvent(browser, env, event));
       } catch (error) {
