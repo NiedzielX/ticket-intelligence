@@ -1,65 +1,45 @@
-# Cloudflare emergency collector
+# Cloudflare emergency Roboticket collector
 
-Temporary raw Roboticket snapshot collector used while GitHub Actions hosted-runner minutes are exhausted.
+Temporary raw-data fallback while GitHub Actions hosted runners are unavailable.
 
 ## What it does
 
-- Runs from a Cloudflare Cron Trigger configured for the Worker.
-- Loads future canonical Lech home events from `ticket_events` in Supabase.
-- Calls Roboticket `GetWGLSectorsInfo` directly over HTTP for each active event.
-- Sums `freeSeatsNo` across `freeSeatsByPriceArea` for every returned sector.
-- Writes one canonical `snapshots` row and matching `sector_inventory` rows per event.
-- Freezes `event_match_date_at_capture` and `event_kickoff_at_capture` from the canonical event at collection time.
-- Does **not** calculate live features, forecasts, outcomes or calibration. Those can be replayed later from the raw snapshots.
+- runs as a Cloudflare Worker;
+- uses Cloudflare Browser Run with `@cloudflare/playwright`;
+- reads future canonical Lech home events from Supabase;
+- opens the Roboticket event page in a real browser session;
+- calls `GetWGLSectorsInfo` from inside the same page context so Roboticket receives browser cookies/session state;
+- writes canonical `snapshots` and `sector_inventory` rows directly to Supabase;
+- freezes `event_match_date_at_capture` and `event_kickoff_at_capture`;
+- processes all active events sequentially in one browser instance;
+- does not run features, forecasts, evaluation or calibration.
 
-The collector does not use Cloudflare Browser Rendering or Playwright.
+The Worker is configured for hourly collection at minute 13. This cadence is intentional because Browser Run on Workers Free includes 10 browser minutes per day.
 
-## Required runtime configuration
+## Required secrets
 
-Runtime variables:
-
-- `SUPABASE_URL`
-- `EVENT_PROVIDER` (default `roboticket`)
-- `EVENT_HOME_TEAM` (default `Lech Poznań`)
-
-Secrets:
+Configure these as Cloudflare Worker secrets. Do not commit their values:
 
 - `SUPABASE_SECRET_KEY`
-- `MANUAL_RUN_TOKEN` only if `/run` should be used manually
+- `MANUAL_RUN_TOKEN` (only needed for `/run`)
 
-Do not commit secret values to GitHub or `wrangler.jsonc`.
+`SUPABASE_URL`, `EVENT_PROVIDER` and `EVENT_HOME_TEAM` are non-secret Wrangler variables.
 
-Generate a manual-run token locally, for example:
+## Manual validation
 
-```bash
-openssl rand -hex 24
-```
-
-## Test
-
-After deploy, the Worker has a public health endpoint:
+After deployment, invoke `/run` with:
 
 ```text
-/health
+Authorization: Bearer <MANUAL_RUN_TOKEN>
 ```
 
-For an authenticated manual collection run:
+A successful log contains entries similar to:
 
-```bash
-curl -H "Authorization: Bearer <MANUAL_RUN_TOKEN>" https://<worker-url>/run
+```text
+Browser page ready for 10069: status=200, finalUrl=...
+Roboticket browser sector response for 10069: status=200, sectors=...
 ```
 
-The normal collector is triggered automatically by the Cloudflare Cron Trigger.
+and a JSON result with a new `snapshot_id` and `available_total`.
 
-## Collection semantics
-
-`available` is the number reported by Roboticket as `freeSeatsNo` for the sector, summed across all price areas. It is an inventory/demand proxy, not confirmed ticket sales.
-
-## After GitHub Actions resets
-
-1. Keep the Cloudflare collector running until GitHub collection is confirmed healthy again.
-2. Rebuild live features / forecast observations from the Cloudflare-collected raw snapshots where needed.
-3. Disable the Cloudflare Cron Trigger to avoid duplicate snapshots.
-4. Do not delete the raw snapshots already collected.
-
-This emergency collector intentionally does not replace canonical event discovery. It only collects events already present in `ticket_events`.
+Do not merge this emergency collector to `main` until a live Browser Run invocation confirms that Roboticket returns sector JSON and Supabase writes succeed.
