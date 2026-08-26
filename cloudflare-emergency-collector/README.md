@@ -8,7 +8,7 @@ Temporary raw-data fallback while GitHub Actions hosted runners are unavailable.
 - uses Cloudflare Browser Run with `@cloudflare/playwright`;
 - reads future canonical Lech home events from Supabase;
 - opens the Roboticket event page in a real browser session;
-- calls `GetWGLSectorsInfo` from inside the same page context so Roboticket receives browser cookies/session state;
+- calls `GetWGLSectorsInfo` from inside the same page context so Roboticket receives browser cookies, client-side state and same-origin request context;
 - writes canonical `snapshots` and `sector_inventory` rows directly to Supabase;
 - freezes `event_match_date_at_capture` and `event_kickoff_at_capture`;
 - processes all active events sequentially in one browser instance;
@@ -41,5 +41,7 @@ Roboticket browser sector response for 10069: status=200, sectors=...
 ```
 
 and a JSON result with a new `snapshot_id` and `available_total`.
+
+If Browser Run still receives an empty body from `GetWGLSectorsInfo`, treat that as evidence that Roboticket is filtering Cloudflare/browser-automation traffic rather than merely requiring cookies/session bootstrap.
 
 Do not merge this emergency collector to `main` until a live Browser Run invocation confirms that Roboticket returns sector JSON and Supabase writes succeed.
