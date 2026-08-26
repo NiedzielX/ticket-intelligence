@@ -1,9 +1,12 @@
+import { launch } from "@cloudflare/playwright";
+
 type Env = {
   SUPABASE_URL: string;
   SUPABASE_SECRET_KEY: string;
   MANUAL_RUN_TOKEN?: string;
   EVENT_PROVIDER?: string;
   EVENT_HOME_TEAM?: string;
+  BROWSER: any;
 };
 
 type TicketEvent = {
@@ -22,11 +25,10 @@ type Sector = {
   available: number;
 };
 
-const ROBOTICKET_ORIGIN = "https://bilety.lechpoznan.pl";
-const ROBOTICKET_BASE_URL = `${ROBOTICKET_ORIGIN}/Stadium`;
+const ROBOTICKET_BASE_URL = "https://bilety.lechpoznan.pl/Stadium";
 const SECTOR_INFO_ENDPOINT = "GetWGLSectorsInfo";
 const BROWSER_USER_AGENT =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
 function headers(env: Env, prefer?: string): HeadersInit {
@@ -88,148 +90,74 @@ function parseSectors(data: any): Sector[] {
   return sectors;
 }
 
-function getSetCookieValues(headers: Headers): string[] {
-  const anyHeaders = headers as any;
-  if (typeof anyHeaders.getSetCookie === "function") {
-    return anyHeaders.getSetCookie();
-  }
-  if (typeof anyHeaders.getAll === "function") {
-    try {
-      return anyHeaders.getAll("Set-Cookie") || [];
-    } catch {
-      // Fall through to the combined header representation.
-    }
-  }
-  const combined = headers.get("Set-Cookie");
-  if (!combined) return [];
-  return combined.split(/,(?=\s*[^;,=\s]+=)/g);
-}
-
-function applySetCookies(cookieJar: Map<string, string>, setCookies: string[]): void {
-  for (const setCookie of setCookies) {
-    const firstPart = setCookie.split(";", 1)[0]?.trim();
-    if (!firstPart) continue;
-    const separator = firstPart.indexOf("=");
-    if (separator <= 0) continue;
-    const name = firstPart.slice(0, separator).trim();
-    const value = firstPart.slice(separator + 1).trim();
-    if (/max-age=0/i.test(setCookie) || !value) {
-      cookieJar.delete(name);
-    } else {
-      cookieJar.set(name, value);
-    }
-  }
-}
-
-function cookieHeader(cookieJar: Map<string, string>): string {
-  return Array.from(cookieJar.entries())
-    .map(([name, value]) => `${name}=${value}`)
-    .join("; ");
-}
-
-async function bootstrapRoboticketSession(eventUrl: string): Promise<Map<string, string>> {
-  const cookies = new Map<string, string>();
-  let currentUrl = eventUrl;
-
-  for (let redirect = 0; redirect < 6; redirect += 1) {
-    const response = await fetch(currentUrl, {
-      method: "GET",
-      redirect: "manual",
-      headers: {
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
-        "Cache-Control": "no-cache",
-        Pragma: "no-cache",
-        "User-Agent": BROWSER_USER_AGENT,
-        ...(cookies.size ? { Cookie: cookieHeader(cookies) } : {}),
-      },
-    });
-
-    applySetCookies(cookies, getSetCookieValues(response.headers));
-
-    const location = response.headers.get("Location");
-    if (response.status >= 300 && response.status < 400 && location) {
-      currentUrl = new URL(location, currentUrl).toString();
-      await response.body?.cancel().catch(() => undefined);
-      continue;
-    }
-
-    await response.body?.cancel().catch(() => undefined);
-
-    if (!response.ok) {
-      throw new Error(
-        `Roboticket session bootstrap ${response.status} at ${new URL(currentUrl).host}.`,
-      );
-    }
-
-    if (!currentUrl.startsWith(ROBOTICKET_ORIGIN)) {
-      throw new Error(
-        `Roboticket session bootstrap left ticket host: ${new URL(currentUrl).host}.`,
-      );
-    }
-
-    console.log(
-      `Roboticket session ready: status=${response.status}, cookies=${Array.from(cookies.keys()).join(",") || "none"}`,
-    );
-    return cookies;
-  }
-
-  throw new Error("Roboticket session bootstrap exceeded redirect limit.");
-}
-
-async function fetchSectorInfo(event: TicketEvent): Promise<any> {
+async function fetchSectorInfo(page: any, event: TicketEvent): Promise<any> {
   const eventId = encodeURIComponent(event.external_event_id);
-  const endpoint = `${ROBOTICKET_BASE_URL}/${SECTOR_INFO_ENDPOINT}?eventId=${eventId}`;
   const eventUrl =
     event.source_url || `${ROBOTICKET_BASE_URL}/Index?eventId=${eventId}`;
+  const endpoint = `${ROBOTICKET_BASE_URL}/${SECTOR_INFO_ENDPOINT}?eventId=${eventId}`;
 
-  const cookies = await bootstrapRoboticketSession(eventUrl);
-  console.log(`Fetching ${event.external_event_id}: ${endpoint}`);
-
-  const response = await fetch(endpoint, {
-    method: "GET",
-    redirect: "manual",
-    headers: {
-      Accept: "application/json, text/plain, */*",
-      "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
-      "Cache-Control": "no-cache",
-      Pragma: "no-cache",
-      Referer: eventUrl,
-      "User-Agent": BROWSER_USER_AGENT,
-      "X-Requested-With": "XMLHttpRequest",
-      ...(cookies.size ? { Cookie: cookieHeader(cookies) } : {}),
-    },
+  console.log(`Browser loading ${event.external_event_id}: ${eventUrl}`);
+  const navigation = await page.goto(eventUrl, {
+    waitUntil: "domcontentloaded",
+    timeout: 30000,
   });
 
-  applySetCookies(cookies, getSetCookieValues(response.headers));
-  const text = await response.text();
-  const contentType = response.headers.get("Content-Type") || "unknown";
-  const location = response.headers.get("Location");
+  console.log(
+    `Browser page ready for ${event.external_event_id}: status=${navigation?.status() ?? "unknown"}, finalUrl=${page.url()}`,
+  );
 
-  if (!response.ok || (response.status >= 300 && response.status < 400)) {
+  await page.waitForTimeout(750);
+
+  const result = await page.evaluate(
+    async ({ endpoint }: { endpoint: string }) => {
+      const response = await window.fetch(endpoint, {
+        method: "GET",
+        credentials: "include",
+        cache: "no-store",
+        headers: {
+          Accept: "application/json, text/plain, */*",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      });
+      return {
+        status: response.status,
+        contentType: response.headers.get("content-type"),
+        text: await response.text(),
+      };
+    },
+    { endpoint },
+  );
+
+  if (result.status < 200 || result.status >= 300) {
     throw new Error(
-      `Roboticket ${SECTOR_INFO_ENDPOINT} status=${response.status}, contentType=${contentType}, location=${location || "none"}, bodyLength=${text.length} for ${event.external_event_id}: ${text.slice(0, 300)}`,
+      `Roboticket ${SECTOR_INFO_ENDPOINT} browser request status=${result.status}, contentType=${result.contentType || "unknown"}, bodyLength=${result.text.length} for ${event.external_event_id}: ${result.text.slice(0, 300)}`,
+    );
+  }
+
+  if (!result.text) {
+    const cookies = await page.context().cookies();
+    throw new Error(
+      `Roboticket ${SECTOR_INFO_ENDPOINT} browser request returned empty body: status=${result.status}, contentType=${result.contentType || "unknown"}, cookies=${cookies.map((cookie: any) => cookie.name).join(",") || "none"} for ${event.external_event_id}.`,
     );
   }
 
   let data: any;
   try {
-    data = JSON.parse(text);
+    data = JSON.parse(result.text);
   } catch {
     throw new Error(
-      `Roboticket ${SECTOR_INFO_ENDPOINT} returned non-JSON: status=${response.status}, contentType=${contentType}, bodyLength=${text.length}, cookies=${Array.from(cookies.keys()).join(",") || "none"} for ${event.external_event_id}: ${text.slice(0, 300)}`,
+      `Roboticket ${SECTOR_INFO_ENDPOINT} browser request returned non-JSON: status=${result.status}, contentType=${result.contentType || "unknown"}, bodyLength=${result.text.length} for ${event.external_event_id}: ${result.text.slice(0, 300)}`,
     );
   }
 
   if (!Array.isArray(data?.sectors)) {
     throw new Error(
-      `Roboticket ${SECTOR_INFO_ENDPOINT} returned no sectors for ${event.external_event_id}.`,
+      `Roboticket ${SECTOR_INFO_ENDPOINT} browser request returned no sectors for ${event.external_event_id}.`,
     );
   }
 
   console.log(
-    `Roboticket sector response for ${event.external_event_id}: ${response.status}, sectors=${data.sectors.length}, contentType=${contentType}`,
+    `Roboticket browser sector response for ${event.external_event_id}: status=${result.status}, sectors=${data.sectors.length}, contentType=${result.contentType || "unknown"}`,
   );
   return data;
 }
@@ -288,8 +216,8 @@ async function createSnapshot(
   };
 }
 
-async function collectEvent(env: Env, event: TicketEvent): Promise<any> {
-  const sectorData = await fetchSectorInfo(event);
+async function collectEvent(env: Env, page: any, event: TicketEvent): Promise<any> {
+  const sectorData = await fetchSectorInfo(page, event);
   const sectors = parseSectors(sectorData);
   if (!sectors.length) {
     throw new Error(`No sector inventory returned for ${event.external_event_id}.`);
@@ -320,19 +248,30 @@ async function runCollector(env: Env): Promise<any> {
 
   const results: any[] = [];
   const failures: any[] = [];
+  const browser = await launch(env.BROWSER);
 
-  for (const event of events) {
-    try {
-      results.push(await collectEvent(env, event));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`Collection failed for ${event.external_event_id}: ${message}`);
-      failures.push({
-        provider_event_id: event.external_event_id,
-        away_team: event.away_team,
-        error: message,
-      });
+  try {
+    const context = await browser.newContext({
+      userAgent: BROWSER_USER_AGENT,
+      locale: "pl-PL",
+    });
+    const page = await context.newPage();
+
+    for (const event of events) {
+      try {
+        results.push(await collectEvent(env, page, event));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`Collection failed for ${event.external_event_id}: ${message}`);
+        failures.push({
+          provider_event_id: event.external_event_id,
+          away_team: event.away_team,
+          error: message,
+        });
+      }
     }
+  } finally {
+    await browser.close();
   }
 
   const summary = {
