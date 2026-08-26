@@ -22,8 +22,12 @@ type Sector = {
   available: number;
 };
 
-const ROBOTICKET_BASE_URL = "https://bilety.lechpoznan.pl/Stadium";
+const ROBOTICKET_ORIGIN = "https://bilety.lechpoznan.pl";
+const ROBOTICKET_BASE_URL = `${ROBOTICKET_ORIGIN}/Stadium`;
 const SECTOR_INFO_ENDPOINT = "GetWGLSectorsInfo";
+const BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
 function headers(env: Env, prefer?: string): HeadersInit {
   const result: Record<string, string> = {
@@ -84,26 +88,128 @@ function parseSectors(data: any): Sector[] {
   return sectors;
 }
 
+function getSetCookieValues(headers: Headers): string[] {
+  const anyHeaders = headers as any;
+  if (typeof anyHeaders.getSetCookie === "function") {
+    return anyHeaders.getSetCookie();
+  }
+  if (typeof anyHeaders.getAll === "function") {
+    try {
+      return anyHeaders.getAll("Set-Cookie") || [];
+    } catch {
+      // Fall through to the combined header representation.
+    }
+  }
+  const combined = headers.get("Set-Cookie");
+  if (!combined) return [];
+  return combined.split(/,(?=\s*[^;,=\s]+=)/g);
+}
+
+function applySetCookies(cookieJar: Map<string, string>, setCookies: string[]): void {
+  for (const setCookie of setCookies) {
+    const firstPart = setCookie.split(";", 1)[0]?.trim();
+    if (!firstPart) continue;
+    const separator = firstPart.indexOf("=");
+    if (separator <= 0) continue;
+    const name = firstPart.slice(0, separator).trim();
+    const value = firstPart.slice(separator + 1).trim();
+    if (/max-age=0/i.test(setCookie) || !value) {
+      cookieJar.delete(name);
+    } else {
+      cookieJar.set(name, value);
+    }
+  }
+}
+
+function cookieHeader(cookieJar: Map<string, string>): string {
+  return Array.from(cookieJar.entries())
+    .map(([name, value]) => `${name}=${value}`)
+    .join("; ");
+}
+
+async function bootstrapRoboticketSession(eventUrl: string): Promise<Map<string, string>> {
+  const cookies = new Map<string, string>();
+  let currentUrl = eventUrl;
+
+  for (let redirect = 0; redirect < 6; redirect += 1) {
+    const response = await fetch(currentUrl, {
+      method: "GET",
+      redirect: "manual",
+      headers: {
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
+        "Cache-Control": "no-cache",
+        Pragma: "no-cache",
+        "User-Agent": BROWSER_USER_AGENT,
+        ...(cookies.size ? { Cookie: cookieHeader(cookies) } : {}),
+      },
+    });
+
+    applySetCookies(cookies, getSetCookieValues(response.headers));
+
+    const location = response.headers.get("Location");
+    if (response.status >= 300 && response.status < 400 && location) {
+      currentUrl = new URL(location, currentUrl).toString();
+      await response.body?.cancel().catch(() => undefined);
+      continue;
+    }
+
+    await response.body?.cancel().catch(() => undefined);
+
+    if (!response.ok) {
+      throw new Error(
+        `Roboticket session bootstrap ${response.status} at ${new URL(currentUrl).host}.`,
+      );
+    }
+
+    if (!currentUrl.startsWith(ROBOTICKET_ORIGIN)) {
+      throw new Error(
+        `Roboticket session bootstrap left ticket host: ${new URL(currentUrl).host}.`,
+      );
+    }
+
+    console.log(
+      `Roboticket session ready: status=${response.status}, cookies=${Array.from(cookies.keys()).join(",") || "none"}`,
+    );
+    return cookies;
+  }
+
+  throw new Error("Roboticket session bootstrap exceeded redirect limit.");
+}
+
 async function fetchSectorInfo(event: TicketEvent): Promise<any> {
   const eventId = encodeURIComponent(event.external_event_id);
   const endpoint = `${ROBOTICKET_BASE_URL}/${SECTOR_INFO_ENDPOINT}?eventId=${eventId}`;
   const eventUrl =
     event.source_url || `${ROBOTICKET_BASE_URL}/Index?eventId=${eventId}`;
 
+  const cookies = await bootstrapRoboticketSession(eventUrl);
   console.log(`Fetching ${event.external_event_id}: ${endpoint}`);
+
   const response = await fetch(endpoint, {
     method: "GET",
+    redirect: "manual",
     headers: {
       Accept: "application/json, text/plain, */*",
-      Referer: eventUrl,
+      "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
       "Cache-Control": "no-cache",
+      Pragma: "no-cache",
+      Referer: eventUrl,
+      "User-Agent": BROWSER_USER_AGENT,
+      "X-Requested-With": "XMLHttpRequest",
+      ...(cookies.size ? { Cookie: cookieHeader(cookies) } : {}),
     },
   });
 
+  applySetCookies(cookies, getSetCookieValues(response.headers));
   const text = await response.text();
-  if (!response.ok) {
+  const contentType = response.headers.get("Content-Type") || "unknown";
+  const location = response.headers.get("Location");
+
+  if (!response.ok || (response.status >= 300 && response.status < 400)) {
     throw new Error(
-      `Roboticket ${SECTOR_INFO_ENDPOINT} ${response.status} for ${event.external_event_id}: ${text.slice(0, 500)}`,
+      `Roboticket ${SECTOR_INFO_ENDPOINT} status=${response.status}, contentType=${contentType}, location=${location || "none"}, bodyLength=${text.length} for ${event.external_event_id}: ${text.slice(0, 300)}`,
     );
   }
 
@@ -112,7 +218,7 @@ async function fetchSectorInfo(event: TicketEvent): Promise<any> {
     data = JSON.parse(text);
   } catch {
     throw new Error(
-      `Roboticket ${SECTOR_INFO_ENDPOINT} returned non-JSON for ${event.external_event_id}: ${text.slice(0, 500)}`,
+      `Roboticket ${SECTOR_INFO_ENDPOINT} returned non-JSON: status=${response.status}, contentType=${contentType}, bodyLength=${text.length}, cookies=${Array.from(cookies.keys()).join(",") || "none"} for ${event.external_event_id}: ${text.slice(0, 300)}`,
     );
   }
 
@@ -123,7 +229,7 @@ async function fetchSectorInfo(event: TicketEvent): Promise<any> {
   }
 
   console.log(
-    `Roboticket sector response for ${event.external_event_id}: ${response.status}, sectors=${data.sectors.length}`,
+    `Roboticket sector response for ${event.external_event_id}: ${response.status}, sectors=${data.sectors.length}, contentType=${contentType}`,
   );
   return data;
 }
