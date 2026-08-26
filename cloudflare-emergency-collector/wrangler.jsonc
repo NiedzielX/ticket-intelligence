@@ -11,6 +11,16 @@
   "triggers": {
     "crons": ["*/5 * * * *"]
   },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "persist": true,
+      "invocation_logs": true
+    }
+  },
   "vars": {
     "EVENT_PROVIDER": "roboticket",
     "EVENT_HOME_TEAM": "Lech Poznań"
