@@ -2,12 +2,20 @@ name: Live Ticket Features v0.1
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - build_live_ticket_features_v01.py
+      - test_live_ticket_features_v01.py
+      - .github/workflows/live-ticket-features-v01.yml
   push:
     branches:
       - main
     paths:
       - build_active_ticket_event_matrix_v01.py
       - build_live_ticket_features_v01.py
+      - test_live_ticket_features_v01.py
       - sql/snapshot_event_context_v01.sql
       - .github/workflows/live-ticket-features-v01.yml
   schedule:
@@ -17,7 +25,24 @@ permissions:
   contents: read
 
 jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Test live feature gap handling
+        run: python test_live_ticket_features_v01.py
+
   active-events:
+    needs: self-test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -64,6 +89,8 @@ jobs:
       EVENT_PROVIDER: "roboticket"
       TRANSIENT_JUMP_THRESHOLD: "500"
       TRANSIENT_RETURN_TOLERANCE: "100"
+      SNAPSHOT_GAP_THRESHOLD_HOURS: "2.5"
+      WINDOW_MAX_OVERSHOOT_HOURS: "2.5"
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
 

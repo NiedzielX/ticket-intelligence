@@ -17,6 +17,8 @@ PAGE_SIZE = 1000
 SNAPSHOT_QUERY_CHUNK = 100
 TRANSIENT_JUMP_THRESHOLD = int(os.getenv("TRANSIENT_JUMP_THRESHOLD", "500"))
 TRANSIENT_RETURN_TOLERANCE = int(os.getenv("TRANSIENT_RETURN_TOLERANCE", "100"))
+SNAPSHOT_GAP_THRESHOLD_HOURS = float(os.getenv("SNAPSHOT_GAP_THRESHOLD_HOURS", "2.5"))
+WINDOW_MAX_OVERSHOOT_HOURS = float(os.getenv("WINDOW_MAX_OVERSHOOT_HOURS", "2.5"))
 
 
 def api_get_all(path):
@@ -242,15 +244,90 @@ def detect_transient_spikes(records):
     return excluded_ids, anomaly_rows
 
 
-def window_baseline(records, current_index, window_hours):
+def hours_between(later, earlier):
+    return (later - earlier).total_seconds() / 3600.0
+
+
+def window_baseline_index(records, current_index, window_hours):
     current_time = records[current_index]["_captured_at"]
     cutoff = current_time - timedelta(hours=window_hours)
 
     for candidate_index in range(current_index - 1, -1, -1):
         if records[candidate_index]["_captured_at"] <= cutoff:
-            return records[candidate_index]
+            return candidate_index
 
     return None
+
+
+def max_gap_hours(records, start_index, end_index):
+    if end_index <= start_index:
+        return None
+
+    gaps = [
+        hours_between(records[index]["_captured_at"], records[index - 1]["_captured_at"])
+        for index in range(start_index + 1, end_index + 1)
+    ]
+    return max(gaps) if gaps else None
+
+
+def max_recent_gap_hours(records, current_index, lookback_hours=24):
+    if current_index <= 0:
+        return None
+
+    current_time = records[current_index]["_captured_at"]
+    cutoff = current_time - timedelta(hours=lookback_hours)
+    start_index = current_index
+
+    while start_index > 0 and records[start_index - 1]["_captured_at"] >= cutoff:
+        start_index -= 1
+
+    if start_index > 0:
+        start_index -= 1
+
+    return max_gap_hours(records, start_index, current_index)
+
+
+def calculate_window_features(records, current_index, window_hours):
+    baseline_index = window_baseline_index(records, current_index, window_hours)
+
+    if baseline_index is None:
+        return {
+            "actual_window": None,
+            "net_removed": None,
+            "velocity": None,
+            "max_gap": None,
+            "data_gap_detected": False,
+            "quality_status": "insufficient_history",
+        }
+
+    current = records[current_index]
+    baseline = records[baseline_index]
+    actual_window = hours_between(current["_captured_at"], baseline["_captured_at"])
+    max_gap = max_gap_hours(records, baseline_index, current_index)
+    baseline_overshoot = actual_window > window_hours + WINDOW_MAX_OVERSHOOT_HOURS
+    internal_gap = max_gap is not None and max_gap > SNAPSHOT_GAP_THRESHOLD_HOURS
+    data_gap_detected = baseline_overshoot or internal_gap
+
+    if data_gap_detected:
+        return {
+            "actual_window": actual_window,
+            "net_removed": None,
+            "velocity": None,
+            "max_gap": max_gap,
+            "data_gap_detected": True,
+            "quality_status": "gap_detected",
+        }
+
+    net_removed = baseline["available_total"] - current["available_total"]
+    velocity = net_removed / actual_window if actual_window > 0 else None
+    return {
+        "actual_window": actual_window,
+        "net_removed": net_removed,
+        "velocity": velocity,
+        "max_gap": max_gap,
+        "data_gap_detected": False,
+        "quality_status": "ready",
+    }
 
 
 def calculate_features(records):
@@ -261,37 +338,30 @@ def calculate_features(records):
         previous = records[index - 1] if index > 0 else None
 
         if previous:
-            elapsed_hours = (
-                record["_captured_at"] - previous["_captured_at"]
-            ).total_seconds() / 3600.0
+            elapsed_hours = hours_between(record["_captured_at"], previous["_captured_at"])
             net_removed_previous = previous["available_total"] - record["available_total"]
+            previous_gap_detected = elapsed_hours > SNAPSHOT_GAP_THRESHOLD_HOURS
             velocity_previous = (
-                net_removed_previous / elapsed_hours if elapsed_hours > 0 else None
+                net_removed_previous / elapsed_hours
+                if elapsed_hours > 0 and not previous_gap_detected
+                else None
             )
         else:
             elapsed_hours = None
             net_removed_previous = None
+            previous_gap_detected = False
             velocity_previous = None
 
         derived = {}
 
         for window_hours in (6, 24):
-            baseline = window_baseline(records, index, window_hours)
-
-            if baseline:
-                actual_window = (
-                    record["_captured_at"] - baseline["_captured_at"]
-                ).total_seconds() / 3600.0
-                net_removed = baseline["available_total"] - record["available_total"]
-                velocity = net_removed / actual_window if actual_window > 0 else None
-            else:
-                actual_window = None
-                net_removed = None
-                velocity = None
-
-            derived[f"window_{window_hours}h_actual_hours"] = round_or_none(actual_window)
-            derived[f"net_removed_{window_hours}h"] = net_removed
-            derived[f"inventory_velocity_{window_hours}h"] = round_or_none(velocity)
+            window = calculate_window_features(records, index, window_hours)
+            derived[f"window_{window_hours}h_actual_hours"] = round_or_none(window["actual_window"])
+            derived[f"window_{window_hours}h_max_snapshot_gap_hours"] = round_or_none(window["max_gap"])
+            derived[f"window_{window_hours}h_data_gap_detected"] = window["data_gap_detected"]
+            derived[f"window_{window_hours}h_quality_status"] = window["quality_status"]
+            derived[f"net_removed_{window_hours}h"] = window["net_removed"]
+            derived[f"inventory_velocity_{window_hours}h"] = round_or_none(window["velocity"])
 
         velocity_6h = derived["inventory_velocity_6h"]
         velocity_24h = derived["inventory_velocity_24h"]
@@ -305,14 +375,18 @@ def calculate_features(records):
             record["available_total"] / first_available if first_available > 0 else None
         )
 
-        history_hours = (
-            record["_captured_at"] - records[0]["_captured_at"]
-        ).total_seconds() / 3600.0
+        history_hours = hours_between(record["_captured_at"], records[0]["_captured_at"])
+        recent_max_gap = max_recent_gap_hours(records, index, 24)
+        data_gap_detected = (
+            recent_max_gap is not None and recent_max_gap > SNAPSHOT_GAP_THRESHOLD_HOURS
+        )
 
-        if history_hours >= 24:
+        if derived["window_24h_quality_status"] == "ready":
             signal_readiness = "24h_ready"
-        elif history_hours >= 6:
+        elif derived["window_6h_quality_status"] == "ready":
             signal_readiness = "6h_ready"
+        elif data_gap_detected or previous_gap_detected:
+            signal_readiness = "data_gap"
         elif index >= 1:
             signal_readiness = "short_history"
         else:
@@ -333,12 +407,16 @@ def calculate_features(records):
                 "hours_to_kickoff": record["hours_to_kickoff"],
                 "signal_readiness": signal_readiness,
                 "history_hours": round_or_none(history_hours),
+                "data_gap_detected": data_gap_detected,
+                "max_snapshot_gap_hours": round_or_none(recent_max_gap),
+                "snapshot_gap_threshold_hours": SNAPSHOT_GAP_THRESHOLD_HOURS,
                 "sector_count": record["sector_count"],
                 "available_total": record["available_total"],
                 "first_available_total": first_available,
                 "available_index": round_or_none(available_index, 6),
                 "net_removed_since_first": first_available - record["available_total"],
                 "elapsed_hours_since_previous": round_or_none(elapsed_hours),
+                "previous_gap_detected": previous_gap_detected,
                 "net_removed_since_previous": net_removed_previous,
                 "inventory_velocity_since_previous": round_or_none(velocity_previous),
                 **derived,
@@ -379,15 +457,18 @@ def write_outputs(ticket_event, raw_snapshot_count, features, anomaly_rows):
         "quality_rule": {
             "transient_jump_threshold": TRANSIENT_JUMP_THRESHOLD,
             "transient_return_tolerance": TRANSIENT_RETURN_TOLERANCE,
+            "snapshot_gap_threshold_hours": SNAPSHOT_GAP_THRESHOLD_HOURS,
+            "window_max_overshoot_hours": WINDOW_MAX_OVERSHOOT_HOURS,
             "description": (
-                "Exclude a single snapshot when availability jumps by at least the threshold, "
-                "reverses by at least the threshold in the next snapshot, and returns close to "
-                "the pre-jump level."
+                "Exclude single-snapshot transient spikes. Treat snapshot gaps above the threshold "
+                "as missing data: do not interpolate or calculate affected velocity windows. "
+                "A window baseline may be at most the configured overshoot beyond its target horizon."
             ),
         },
         "note": (
             "Inventory removal is a demand proxy, not a confirmed sale. "
-            "Negative values are preserved when inventory reappears."
+            "Negative values are preserved when inventory reappears. Missing collection intervals "
+            "are explicitly marked and are not interpreted as zero demand."
         ),
     }
 
@@ -434,6 +515,8 @@ def main():
     print(f"Latest hours to kickoff: {latest['hours_to_kickoff']}")
     print(f"Latest available: {latest['available_total']}")
     print(f"Signal readiness: {latest['signal_readiness']}")
+    print(f"Data gap detected: {latest['data_gap_detected']}")
+    print(f"Max recent snapshot gap hours: {latest['max_snapshot_gap_hours']}")
     print(f"6h inventory velocity: {latest['inventory_velocity_6h']}")
     print(f"24h inventory velocity: {latest['inventory_velocity_24h']}")
     print(f"6h vs 24h acceleration: {latest['inventory_acceleration_6h_vs_24h']}")
