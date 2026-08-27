@@ -83,7 +83,7 @@ jobs:
         run: python build_calibration_report_v01.py
 
       - name: Upload outcome sync artifacts
-        if: always()
+        if: failure() || github.event_name == 'workflow_dispatch' || steps.sync.outputs.new_count != '0'
         uses: actions/upload-artifact@v4
         with:
           name: league-attendance-outcome-sync-v0-1
@@ -92,4 +92,4 @@ jobs:
             forecast_evaluation_artifacts_v01/
             calibration_report_artifacts_v01/
           if-no-files-found: ignore
-          retention-days: 90
+          retention-days: 14

@@ -68,4 +68,4 @@ jobs:
             forecast_evaluation_artifacts_v01/
             calibration_report_artifacts_v01/
           if-no-files-found: ignore
-          retention-days: 90
+          retention-days: 30

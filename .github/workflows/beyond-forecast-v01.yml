@@ -101,9 +101,9 @@ jobs:
         run: python persist_forecast_observation_v01.py
 
       - name: Upload Beyond Forecast artifact
-        if: always()
+        if: failure() || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: beyond-forecast-v0-1-${{ matrix.event.id }}
           path: beyond_forecast_artifacts_v01/
-          retention-days: 30
+          retention-days: 7

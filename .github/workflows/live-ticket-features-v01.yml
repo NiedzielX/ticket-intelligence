@@ -80,9 +80,9 @@ jobs:
         run: python build_live_ticket_features_v01.py
 
       - name: Upload live ticket feature artifact
-        if: always()
+        if: failure() || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: live-ticket-features-v0-1-${{ matrix.event.id }}
           path: live_ticket_artifacts_v01/
-          retention-days: 30
+          retention-days: 3
