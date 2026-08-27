@@ -2,6 +2,13 @@ name: Beyond Forecast v0.1
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - enrich_forecast_live_quality_v01.py
+      - test_forecast_live_quality_v01.py
+      - .github/workflows/beyond-forecast-v01.yml
   push:
     branches:
       - main
@@ -9,6 +16,8 @@ on:
       - build_active_ticket_event_matrix_v01.py
       - build_live_ticket_features_v01.py
       - build_beyond_forecast_v01.py
+      - enrich_forecast_live_quality_v01.py
+      - test_forecast_live_quality_v01.py
       - persist_forecast_observation_v01.py
       - sql/snapshot_event_context_v01.sql
       - .github/workflows/beyond-forecast-v01.yml
@@ -19,7 +28,24 @@ permissions:
   contents: read
 
 jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Test forecast live quality persistence
+        run: python test_forecast_live_quality_v01.py
+
   active-events:
+    needs: self-test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -72,6 +98,8 @@ jobs:
       HOLDOUT_MAE_TOLERANCE: "50.0"
       TRANSIENT_JUMP_THRESHOLD: "500"
       TRANSIENT_RETURN_TOLERANCE: "100"
+      SNAPSHOT_GAP_THRESHOLD_HOURS: "2.5"
+      WINDOW_MAX_OVERSHOOT_HOURS: "2.5"
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
 
@@ -95,6 +123,9 @@ jobs:
 
       - name: Build Beyond Forecast
         run: python build_beyond_forecast_v01.py
+
+      - name: Persist live gap quality in forecast payload
+        run: python enrich_forecast_live_quality_v01.py
 
       - name: Persist forecast observation
         if: env.PERSIST_FORECAST == 'true'
