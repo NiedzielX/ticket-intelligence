@@ -12,7 +12,7 @@ on:
       - sql/snapshot_event_context_v01.sql
       - .github/workflows/collect-lech.yml
   schedule:
-    - cron: "13 * * * *"
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: read
