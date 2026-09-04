@@ -14,13 +14,17 @@ on:
   schedule:
     - cron: "*/5 * * * *"
 
+concurrency:
+  group: lech-inventory-continuous
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 350
 
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -70,11 +74,40 @@ jobs:
       - name: Install Chromium
         run: python -m playwright install chromium
 
-      - name: Discover active Lech Roboticket events
-        run: python discover_roboticket_events_v01.py
+      - name: Collect active Lech Roboticket events continuously
+        shell: bash
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            ITERATIONS=1
+          else
+            ITERATIONS=60
+          fi
 
-      - name: Collect discovered events
-        run: python collect_discovered_events_v01.py
+          SUCCESSFUL_ITERATIONS=0
+          FAILED_ITERATIONS=0
+
+          for ITERATION in $(seq 1 "$ITERATIONS"); do
+            echo "=== Collector iteration $ITERATION/$ITERATIONS ==="
+
+            if python discover_roboticket_events_v01.py && python collect_discovered_events_v01.py; then
+              SUCCESSFUL_ITERATIONS=$((SUCCESSFUL_ITERATIONS + 1))
+            else
+              FAILED_ITERATIONS=$((FAILED_ITERATIONS + 1))
+              echo "::warning::Collector iteration $ITERATION failed; continuing with the next sample."
+            fi
+
+            if [ "$ITERATION" -lt "$ITERATIONS" ]; then
+              sleep 300
+            fi
+          done
+
+          echo "Successful iterations: $SUCCESSFUL_ITERATIONS"
+          echo "Failed iterations: $FAILED_ITERATIONS"
+
+          if [ "$SUCCESSFUL_ITERATIONS" -eq 0 ]; then
+            echo "::error::No collector iteration succeeded."
+            exit 1
+          fi
 
       - name: Upload collection diagnostics
         if: failure() || github.event_name == 'workflow_dispatch'
