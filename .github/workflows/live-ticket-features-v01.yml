@@ -9,17 +9,6 @@ on:
       - build_live_ticket_features_v01.py
       - test_live_ticket_features_v01.py
       - .github/workflows/live-ticket-features-v01.yml
-  push:
-    branches:
-      - main
-    paths:
-      - build_active_ticket_event_matrix_v01.py
-      - build_live_ticket_features_v01.py
-      - test_live_ticket_features_v01.py
-      - sql/snapshot_event_context_v01.sql
-      - .github/workflows/live-ticket-features-v01.yml
-  schedule:
-    - cron: "25 * * * *"
 
 permissions:
   contents: read
@@ -42,7 +31,7 @@ jobs:
 
   active-events:
     needs: self-test
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -75,7 +64,7 @@ jobs:
 
   build:
     needs: active-events
-    if: needs.active-events.outputs.event_count != '0'
+    if: github.event_name == 'workflow_dispatch' && needs.active-events.outputs.event_count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -107,7 +96,7 @@ jobs:
         run: python build_live_ticket_features_v01.py
 
       - name: Upload live ticket feature artifact
-        if: failure() || github.event_name == 'workflow_dispatch'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: live-ticket-features-v0-1-${{ matrix.event.id }}
