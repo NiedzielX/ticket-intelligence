@@ -9,6 +9,8 @@ on:
       - collector.py
       - collect_discovered_events_v01.py
       - discover_roboticket_events_v01.py
+      - apply_roboticket_event_overrides_v01.py
+      - roboticket_event_overrides_v01.json
       - sql/snapshot_event_context_v01.sql
       - .github/workflows/collect-lech.yml
   schedule:
@@ -89,7 +91,9 @@ jobs:
           for ITERATION in $(seq 1 "$ITERATIONS"); do
             echo "=== Collector iteration $ITERATION/$ITERATIONS ==="
 
-            if python discover_roboticket_events_v01.py && python collect_discovered_events_v01.py; then
+            if python discover_roboticket_events_v01.py \
+              && python apply_roboticket_event_overrides_v01.py \
+              && python collect_discovered_events_v01.py; then
               SUCCESSFUL_ITERATIONS=$((SUCCESSFUL_ITERATIONS + 1))
             else
               FAILED_ITERATIONS=$((FAILED_ITERATIONS + 1))
