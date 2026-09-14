@@ -17,7 +17,7 @@ on:
     - cron: "*/5 * * * *"
 
 concurrency:
-  group: lech-inventory-continuous
+  group: lech-inventory-continuous-v2
   cancel-in-progress: false
 
 permissions:
