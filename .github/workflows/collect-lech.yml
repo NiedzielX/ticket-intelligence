@@ -42,8 +42,8 @@ on:
     - cron: "17 */4 * * *"
 
 concurrency:
-  group: lech-ticket-intelligence-production-v01
-  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+  group: lech-ticket-intelligence-${{ github.event_name == 'pull_request' && 'pr-validation' || 'production-v01' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
 
 permissions:
   contents: read
