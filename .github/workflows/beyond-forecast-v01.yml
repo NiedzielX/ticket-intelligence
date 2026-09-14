@@ -8,21 +8,9 @@ on:
     paths:
       - enrich_forecast_live_quality_v01.py
       - test_forecast_live_quality_v01.py
-      - .github/workflows/beyond-forecast-v01.yml
-  push:
-    branches:
-      - main
-    paths:
-      - build_active_ticket_event_matrix_v01.py
-      - build_live_ticket_features_v01.py
       - build_beyond_forecast_v01.py
-      - enrich_forecast_live_quality_v01.py
-      - test_forecast_live_quality_v01.py
       - persist_forecast_observation_v01.py
-      - sql/snapshot_event_context_v01.sql
       - .github/workflows/beyond-forecast-v01.yml
-  schedule:
-    - cron: "35 * * * *"
 
 permissions:
   contents: read
@@ -45,7 +33,7 @@ jobs:
 
   active-events:
     needs: self-test
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -78,13 +66,9 @@ jobs:
 
   forecast:
     needs: active-events
-    if: needs.active-events.outputs.event_count != '0'
+    if: github.event_name == 'workflow_dispatch' && needs.active-events.outputs.event_count != '0'
     runs-on: ubuntu-latest
-    timeout-minutes: 340
-
-    concurrency:
-      group: beyond-forecast-${{ matrix.event.id }}
-      cancel-in-progress: false
+    timeout-minutes: 20
 
     strategy:
       fail-fast: false
@@ -97,7 +81,7 @@ jobs:
       EVENT_KICKOFF_AT: ${{ matrix.event.kickoff_at }}
       TOTAL_LEAGUE_MATCHES_PER_TEAM: "34"
       STADIUM_CAPACITY: "43269"
-      VALIDATE_BASELINE: ${{ github.event_name == 'push' && matrix.event.competition == 'Ekstraklasa' && 'true' || 'false' }}
+      VALIDATE_BASELINE: "false"
       PERSIST_FORECAST: "true"
       EXPECTED_HOLDOUT_MAE: "5321.8"
       HOLDOUT_MAE_TOLERANCE: "50.0"
@@ -126,64 +110,17 @@ jobs:
         if: matrix.event.competition == 'Ekstraklasa'
         run: python build_lech_demand_dataset_v11.py
 
-      - name: Build and persist Beyond Forecast continuously
-        shell: bash
-        run: |
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            ITERATIONS=1
-          else
-            ITERATIONS=6
-          fi
+      - name: Build Beyond Forecast
+        run: python build_beyond_forecast_v01.py
 
-          SUCCESSFUL_ITERATIONS=0
-          FAILED_ITERATIONS=0
-          KICKOFF_REACHED=0
+      - name: Persist live gap quality in forecast payload
+        run: python enrich_forecast_live_quality_v01.py
 
-          for ITERATION in $(seq 1 "$ITERATIONS"); do
-            if ! python - <<'PY'
-          import os
-          import sys
-          from datetime import datetime, timezone
-
-          kickoff = datetime.fromisoformat(
-              os.environ["EVENT_KICKOFF_AT"].replace("Z", "+00:00")
-          )
-          sys.exit(0 if datetime.now(timezone.utc) < kickoff else 1)
-          PY
-            then
-              echo "Kickoff reached; stopping forecast loop for event $EVENT_ID."
-              KICKOFF_REACHED=1
-              break
-            fi
-
-            echo "=== Forecast iteration $ITERATION/$ITERATIONS for event $EVENT_ID ==="
-
-            if python build_beyond_forecast_v01.py \
-              && python enrich_forecast_live_quality_v01.py \
-              && python persist_forecast_observation_v01.py; then
-              SUCCESSFUL_ITERATIONS=$((SUCCESSFUL_ITERATIONS + 1))
-            else
-              FAILED_ITERATIONS=$((FAILED_ITERATIONS + 1))
-              echo "::warning::Forecast iteration $ITERATION failed; continuing with the next observation."
-            fi
-
-            export VALIDATE_BASELINE=false
-
-            if [ "$ITERATION" -lt "$ITERATIONS" ]; then
-              sleep 3600
-            fi
-          done
-
-          echo "Successful forecast iterations: $SUCCESSFUL_ITERATIONS"
-          echo "Failed forecast iterations: $FAILED_ITERATIONS"
-
-          if [ "$SUCCESSFUL_ITERATIONS" -eq 0 ] && [ "$KICKOFF_REACHED" -eq 0 ]; then
-            echo "::error::No forecast iteration succeeded."
-            exit 1
-          fi
+      - name: Persist forecast observation
+        run: python persist_forecast_observation_v01.py
 
       - name: Upload Beyond Forecast artifact
-        if: failure() || github.event_name == 'workflow_dispatch'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: beyond-forecast-v0-1-${{ matrix.event.id }}
