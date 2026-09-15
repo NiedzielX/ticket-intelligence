@@ -1,4 +1,4 @@
-name: Ticket Intelligence Pipeline v0.1
+name: Ticket Intelligence Pipeline v0.2
 
 on:
   workflow_dispatch:
@@ -39,10 +39,10 @@ on:
       - sql/snapshot_event_context_v01.sql
       - .github/workflows/collect-lech.yml
   schedule:
-    - cron: "17 */4 * * *"
+    - cron: "*/5 * * * *"
 
 concurrency:
-  group: lech-ticket-intelligence-${{ github.event_name == 'pull_request' && 'pr-validation' || 'production-v01' }}
+  group: lech-ticket-intelligence-${{ github.event_name == 'pull_request' && 'pr-validation-v02' || 'production-v02' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
 
 permissions:
@@ -64,6 +64,8 @@ jobs:
       - name: Validate orchestration code
         run: |
           python test_run_active_event_intelligence_v01.py
+          python test_live_ticket_features_v01.py
+          python test_forecast_live_quality_v01.py
           python -m py_compile \
             collector.py \
             collect_discovered_events_v01.py \
@@ -75,11 +77,15 @@ jobs:
     needs: validate
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 45
 
     env:
       EVENT_PROVIDER: "roboticket"
       EVENT_HOME_TEAM: "Lech Poznań"
+      FORECAST_MIN_INTERVAL_MINUTES: "50"
+      MAX_LIVE_SNAPSHOT_AGE_MINUTES: "20"
+      FORECAST_MODEL_VERSION: "beyond-forecast-v0.1"
+      FORCE_INTELLIGENCE: ${{ github.event_name == 'schedule' && 'false' || 'true' }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
       ROBOTICKET_USERNAME: ${{ secrets.ROBOTICKET_USERNAME }}
@@ -130,77 +136,27 @@ jobs:
       - name: Install Chromium
         run: python -m playwright install chromium
 
-      - name: Collect and forecast continuously
-        shell: bash
-        run: |
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            ITERATIONS=1
-          else
-            ITERATIONS=60
-          fi
+      - name: Discover active Lech Roboticket events
+        run: python discover_roboticket_events_v01.py
 
-          SUCCESSFUL_COLLECTIONS=0
-          FAILED_COLLECTIONS=0
-          INTELLIGENCE_ATTEMPTS=0
-          SUCCESSFUL_INTELLIGENCE=0
-          FAILED_INTELLIGENCE=0
+      - name: Apply confirmed event overrides
+        run: python apply_roboticket_event_overrides_v01.py
 
-          for ITERATION in $(seq 1 "$ITERATIONS"); do
-            echo "=== Pipeline iteration $ITERATION/$ITERATIONS ==="
-            COLLECTION_OK=0
+      - name: Collect fresh inventory snapshot
+        run: python collect_discovered_events_v01.py
 
-            if python discover_roboticket_events_v01.py \
-              && python apply_roboticket_event_overrides_v01.py \
-              && python collect_discovered_events_v01.py; then
-              SUCCESSFUL_COLLECTIONS=$((SUCCESSFUL_COLLECTIONS + 1))
-              COLLECTION_OK=1
-            else
-              FAILED_COLLECTIONS=$((FAILED_COLLECTIONS + 1))
-              echo "::warning::Collection iteration $ITERATION failed; continuing with the next sample."
-            fi
-
-            if [ "$COLLECTION_OK" -eq 1 ] \
-              && { [ "$ITERATION" -eq 1 ] || [ $(( (ITERATION - 1) % 12 )) -eq 0 ]; }; then
-              INTELLIGENCE_ATTEMPTS=$((INTELLIGENCE_ATTEMPTS + 1))
-              echo "=== Fresh-snapshot intelligence cycle ==="
-
-              if python run_active_event_intelligence_v01.py; then
-                SUCCESSFUL_INTELLIGENCE=$((SUCCESSFUL_INTELLIGENCE + 1))
-              else
-                FAILED_INTELLIGENCE=$((FAILED_INTELLIGENCE + 1))
-                echo "::warning::Intelligence cycle failed; inventory collection will continue."
-              fi
-            fi
-
-            if [ "$ITERATION" -lt "$ITERATIONS" ]; then
-              sleep 300
-            fi
-          done
-
-          echo "Successful collections: $SUCCESSFUL_COLLECTIONS"
-          echo "Failed collections: $FAILED_COLLECTIONS"
-          echo "Intelligence attempts: $INTELLIGENCE_ATTEMPTS"
-          echo "Successful intelligence cycles: $SUCCESSFUL_INTELLIGENCE"
-          echo "Failed intelligence cycles: $FAILED_INTELLIGENCE"
-
-          if [ "$SUCCESSFUL_COLLECTIONS" -eq 0 ]; then
-            echo "::error::No collection iteration succeeded."
-            exit 1
-          fi
-
-          if [ "$INTELLIGENCE_ATTEMPTS" -gt 0 ] && [ "$SUCCESSFUL_INTELLIGENCE" -eq 0 ]; then
-            echo "::error::Collection succeeded, but no intelligence cycle succeeded."
-            exit 1
-          fi
+      - name: Build due live features and forecasts from fresh data
+        run: python run_active_event_intelligence_v01.py
 
       - name: Upload pipeline diagnostics
         if: failure() || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: ticket-intelligence-pipeline
+          name: ticket-intelligence-pipeline-v0-2
           path: |
             roboticket_discovery_artifacts_v01/
             collector_results_v01/
+            active_ticket_event_matrix.json
             live_ticket_artifacts_v01/
             beyond_forecast_artifacts_v01/
           retention-days: 3
