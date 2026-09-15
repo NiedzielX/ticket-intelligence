@@ -206,11 +206,25 @@ jobs:
                 export FORCE_INTELLIGENCE=false
               fi
 
-              if python run_active_event_intelligence_v01.py; then
+              INTELLIGENCE_OK=0
+              for ATTEMPT in 1 2 3; do
+                echo "Intelligence attempt $ATTEMPT/3"
+                if python run_active_event_intelligence_v01.py; then
+                  INTELLIGENCE_OK=1
+                  break
+                fi
+                if [ "$ATTEMPT" -lt 3 ]; then
+                  BACKOFF=$((ATTEMPT * 20))
+                  echo "::warning::Intelligence attempt $ATTEMPT failed; retrying in ${BACKOFF}s."
+                  sleep "$BACKOFF"
+                fi
+              done
+
+              if [ "$INTELLIGENCE_OK" -eq 1 ]; then
                 SUCCESSFUL_INTELLIGENCE=$((SUCCESSFUL_INTELLIGENCE + 1))
               else
                 FAILED_INTELLIGENCE=$((FAILED_INTELLIGENCE + 1))
-                echo "::warning::Intelligence cycle failed; inventory sampling will continue."
+                echo "::warning::Intelligence cycle failed after 3 attempts; inventory sampling will continue."
               fi
             fi
 
