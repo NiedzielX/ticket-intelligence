@@ -6,11 +6,33 @@ on:
     branches:
       - main
     paths:
-      - enrich_forecast_live_quality_v01.py
-      - test_forecast_live_quality_v01.py
+      - run_active_event_intelligence_v01.py
+      - test_run_active_event_intelligence_v01.py
+      - build_active_ticket_event_matrix_v01.py
+      - build_live_ticket_features_v01.py
       - build_beyond_forecast_v01.py
+      - enrich_forecast_live_quality_v01.py
       - persist_forecast_observation_v01.py
       - .github/workflows/beyond-forecast-v01.yml
+  push:
+    branches:
+      - main
+    paths:
+      - run_active_event_intelligence_v01.py
+      - test_run_active_event_intelligence_v01.py
+      - build_active_ticket_event_matrix_v01.py
+      - build_live_ticket_features_v01.py
+      - build_beyond_forecast_v01.py
+      - enrich_forecast_live_quality_v01.py
+      - persist_forecast_observation_v01.py
+      - sql/snapshot_event_context_v01.sql
+      - .github/workflows/beyond-forecast-v01.yml
+  schedule:
+    - cron: "35 * * * *"
+
+concurrency:
+  group: beyond-forecast-v01
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -28,67 +50,33 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Test live feature gap handling
+        run: python test_live_ticket_features_v01.py
+
       - name: Test forecast live quality persistence
         run: python test_forecast_live_quality_v01.py
 
-  active-events:
+      - name: Test active event intelligence orchestration
+        run: python test_run_active_event_intelligence_v01.py
+
+  intelligence:
     needs: self-test
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      matrix: ${{ steps.matrix.outputs.matrix }}
-      event_count: ${{ steps.matrix.outputs.event_count }}
+    timeout-minutes: 45
+
     env:
       EVENT_PROVIDER: "roboticket"
       EVENT_HOME_TEAM: "Lech Poznań"
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Build active event matrix
-        run: python build_active_ticket_event_matrix_v01.py
-
-      - name: Publish active event matrix
-        id: matrix
-        run: |
-          MATRIX=$(cat active_ticket_event_matrix.json)
-          COUNT=$(python -c "import json; print(len(json.load(open('active_ticket_event_matrix.json'))))")
-          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-          echo "event_count=$COUNT" >> "$GITHUB_OUTPUT"
-
-  forecast:
-    needs: active-events
-    if: github.event_name == 'workflow_dispatch' && needs.active-events.outputs.event_count != '0'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    strategy:
-      fail-fast: false
-      matrix:
-        event: ${{ fromJSON(needs.active-events.outputs.matrix) }}
-
-    env:
-      EVENT_ID: ${{ matrix.event.id }}
-      EVENT_PROVIDER: "roboticket"
-      EVENT_KICKOFF_AT: ${{ matrix.event.kickoff_at }}
       TOTAL_LEAGUE_MATCHES_PER_TEAM: "34"
       STADIUM_CAPACITY: "43269"
-      VALIDATE_BASELINE: "false"
-      PERSIST_FORECAST: "true"
       EXPECTED_HOLDOUT_MAE: "5321.8"
       HOLDOUT_MAE_TOLERANCE: "50.0"
       TRANSIENT_JUMP_THRESHOLD: "500"
       TRANSIENT_RETURN_TOLERANCE: "100"
       SNAPSHOT_GAP_THRESHOLD_HOURS: "2.5"
       WINDOW_MAX_OVERSHOOT_HOURS: "2.5"
+      MAX_LIVE_SNAPSHOT_AGE_MINUTES: "20"
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
 
@@ -106,23 +94,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy requests scikit-learn joblib
 
-      - name: Build leakage-safe historical dataset
-        if: matrix.event.competition == 'Ekstraklasa'
-        run: python build_lech_demand_dataset_v11.py
+      - name: Build fresh live features and persist forecasts
+        run: python run_active_event_intelligence_v01.py
 
-      - name: Build Beyond Forecast
-        run: python build_beyond_forecast_v01.py
-
-      - name: Persist live gap quality in forecast payload
-        run: python enrich_forecast_live_quality_v01.py
-
-      - name: Persist forecast observation
-        run: python persist_forecast_observation_v01.py
-
-      - name: Upload Beyond Forecast artifact
-        if: always()
+      - name: Upload Beyond Forecast diagnostics
+        if: failure() || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: beyond-forecast-v0-1-${{ matrix.event.id }}
-          path: beyond_forecast_artifacts_v01/
+          name: beyond-forecast-v0-1
+          path: |
+            active_ticket_event_matrix.json
+            live_ticket_artifacts_v01/
+            beyond_forecast_artifacts_v01/
           retention-days: 7
