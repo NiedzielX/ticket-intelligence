@@ -2,6 +2,16 @@ name: Collect Lech inventory
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - collector.py
+      - collect_discovered_events_v01.py
+      - discover_roboticket_events_v01.py
+      - apply_roboticket_event_overrides_v01.py
+      - roboticket_event_overrides_v01.json
+      - .github/workflows/collect-lech.yml
   push:
     branches:
       - main
@@ -24,7 +34,29 @@ permissions:
   contents: read
 
 jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile collector scripts
+        run: |
+          python -m py_compile \
+            collector.py \
+            collect_discovered_events_v01.py \
+            discover_roboticket_events_v01.py \
+            apply_roboticket_event_overrides_v01.py
+
   collect:
+    needs: self-test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
