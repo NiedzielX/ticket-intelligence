@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -14,6 +15,10 @@ HISTORICAL_DATASET_PATH = Path(
     "lech_demand_artifacts_v1/lech_demand_dataset_v1.csv"
 )
 HISTORICAL_SOURCE_PATH = Path("lech_demand_artifacts_v1/POL_source.csv")
+LIVE_FEATURE_DIR = Path(os.getenv("LIVE_FEATURE_DIR", "live_ticket_artifacts_v01"))
+MAX_LIVE_SNAPSHOT_AGE_MINUTES = float(
+    os.getenv("MAX_LIVE_SNAPSHOT_AGE_MINUTES", "20")
+)
 
 
 def run_step(label, script, env=None):
@@ -42,6 +47,64 @@ def needs_historical_dataset(events):
 
 def historical_dataset_ready():
     return HISTORICAL_DATASET_PATH.exists() and HISTORICAL_SOURCE_PATH.exists()
+
+
+def parse_timestamp(value):
+    if not value:
+        return None
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def live_feature_path(event_id, directory=LIVE_FEATURE_DIR):
+    return directory / f"event_{event_id}_latest_live_ticket_features_v01.json"
+
+
+def live_snapshot_age_minutes(payload, now=None):
+    latest = payload.get("latest") or {}
+    captured_at = parse_timestamp(latest.get("captured_at"))
+    if captured_at is None:
+        raise RuntimeError("Live feature payload has no latest captured_at.")
+    if captured_at.tzinfo is None:
+        raise RuntimeError("Live feature captured_at must be timezone-aware.")
+
+    reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        raise RuntimeError("Freshness reference time must be timezone-aware.")
+    age_minutes = (reference - captured_at.astimezone(timezone.utc)).total_seconds() / 60.0
+    return age_minutes
+
+
+def assert_fresh_live_features(
+    event_id,
+    path=None,
+    now=None,
+    max_age_minutes=MAX_LIVE_SNAPSHOT_AGE_MINUTES,
+):
+    target = path or live_feature_path(event_id)
+    if not target.exists():
+        raise RuntimeError(f"Missing live feature payload: {target}")
+
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    age_minutes = live_snapshot_age_minutes(payload, now=now)
+
+    if age_minutes < -1:
+        raise RuntimeError(
+            f"Live snapshot for event {event_id} is {abs(age_minutes):.1f} minutes in the future."
+        )
+    if age_minutes > max_age_minutes:
+        raise RuntimeError(
+            f"Live snapshot for event {event_id} is stale: {age_minutes:.1f} minutes old "
+            f"(limit {max_age_minutes:.1f})."
+        )
+
+    latest = payload.get("latest") or {}
+    return {
+        "snapshot_id": latest.get("snapshot_id"),
+        "captured_at": latest.get("captured_at"),
+        "age_minutes": age_minutes,
+        "signal_readiness": latest.get("signal_readiness"),
+        "data_gap_detected": latest.get("data_gap_detected"),
+    }
 
 
 def event_environment(event, base_env=None):
@@ -111,6 +174,15 @@ def main():
                 "build_live_ticket_features_v01.py",
                 env,
             )
+            freshness = assert_fresh_live_features(event_id)
+            print(
+                "Fresh live source: "
+                f"snapshot={freshness['snapshot_id']} "
+                f"age_minutes={freshness['age_minutes']:.1f} "
+                f"readiness={freshness['signal_readiness']} "
+                f"data_gap={freshness['data_gap_detected']}",
+                flush=True,
+            )
 
             if competition == "Ekstraklasa" and not historical_ready:
                 raise RuntimeError(
@@ -140,6 +212,8 @@ def main():
     print(f"Successful intelligence events: {succeeded}")
     print(f"Failed intelligence events: {failed}")
 
+    if failed:
+        raise RuntimeError(f"{failed} active event intelligence cycle(s) failed.")
     if succeeded == 0:
         raise RuntimeError("No active event intelligence cycle succeeded.")
 
