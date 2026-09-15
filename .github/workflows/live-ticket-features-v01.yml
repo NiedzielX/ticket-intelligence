@@ -64,7 +64,7 @@ jobs:
 
   build:
     needs: active-events
-    if: github.event_name == 'workflow_dispatch' && needs.active-events.outputs.event_count != '0'
+    if: needs.active-events.outputs.event_count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
