@@ -2,6 +2,7 @@
 
 import json
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import run_active_event_intelligence_v01 as intelligence
@@ -49,10 +50,78 @@ def test_load_active_events():
         assert intelligence.load_active_events(path) == expected
 
 
+def test_forecast_cadence_guard():
+    now = datetime(2026, 9, 15, 8, 0, tzinfo=timezone.utc)
+    assert intelligence.forecast_due(None, now=now, min_interval_minutes=50)
+    assert not intelligence.forecast_due(
+        now - timedelta(minutes=49),
+        now=now,
+        min_interval_minutes=50,
+    )
+    assert intelligence.forecast_due(
+        now - timedelta(minutes=50),
+        now=now,
+        min_interval_minutes=50,
+    )
+
+
+def write_live_payload(path, captured_at):
+    path.write_text(
+        json.dumps(
+            {
+                "latest": {
+                    "snapshot_id": 123,
+                    "captured_at": captured_at.isoformat(),
+                    "signal_readiness": "24h_ready",
+                    "data_gap_detected": False,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_fresh_live_snapshot_is_accepted():
+    now = datetime(2026, 9, 15, 8, 0, tzinfo=timezone.utc)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "latest.json"
+        write_live_payload(path, now - timedelta(minutes=7))
+        result = intelligence.assert_fresh_live_features(
+            "10235",
+            path=path,
+            now=now,
+            max_age_minutes=20,
+        )
+        assert result["snapshot_id"] == 123
+        assert round(result["age_minutes"], 1) == 7.0
+        assert result["signal_readiness"] == "24h_ready"
+
+
+def test_stale_live_snapshot_is_rejected():
+    now = datetime(2026, 9, 15, 8, 0, tzinfo=timezone.utc)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "latest.json"
+        write_live_payload(path, now - timedelta(minutes=31))
+        try:
+            intelligence.assert_fresh_live_features(
+                "10235",
+                path=path,
+                now=now,
+                max_age_minutes=20,
+            )
+        except RuntimeError as exc:
+            assert "stale" in str(exc).lower()
+        else:
+            raise AssertionError("Stale live snapshot should be rejected.")
+
+
 def main():
     test_event_environment()
     test_historical_dataset_requirement()
     test_load_active_events()
+    test_forecast_cadence_guard()
+    test_fresh_live_snapshot_is_accepted()
+    test_stale_live_snapshot_is_rejected()
     print("SUCCESS")
 
 
