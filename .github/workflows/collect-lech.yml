@@ -148,7 +148,7 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             ITERATIONS=1
           else
-            ITERATIONS=66
+            ITERATIONS=68
           fi
 
           REFRESH_EVERY=12
