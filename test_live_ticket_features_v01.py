@@ -91,11 +91,55 @@ def test_previous_velocity_is_invalid_after_large_gap():
     assert latest["signal_readiness"] == "data_gap"
 
 
+
+def test_bounded_inventory_selection_keeps_first_and_recent_window():
+    records = [record(hour + 1, hour, 20000 - 50 * hour) for hour in range(73)]
+    selected = live.select_inventory_snapshot_ids(records, lookback_hours=30)
+
+    assert 1 in selected
+    assert 43 in selected
+    assert 42 not in selected
+    assert 73 in selected
+    assert len(selected) == 32
+
+
+def test_bounded_history_preserves_latest_live_features():
+    records = [record(hour + 1, hour, 20000 - 50 * hour) for hour in range(73)]
+    full_latest = live.calculate_features(records)[-1]
+
+    selected_ids = set(
+        live.select_inventory_snapshot_ids(records, lookback_hours=30)
+    )
+    bounded_records = [
+        row for row in records if row["snapshot_id"] in selected_ids
+    ]
+    bounded_latest = live.calculate_features(bounded_records)[-1]
+
+    keys = [
+        "history_hours",
+        "available_total",
+        "first_available_total",
+        "available_index",
+        "net_removed_since_first",
+        "inventory_velocity_since_previous",
+        "inventory_velocity_6h",
+        "inventory_velocity_24h",
+        "inventory_acceleration_6h_vs_24h",
+        "window_6h_quality_status",
+        "window_24h_quality_status",
+        "data_gap_detected",
+        "signal_readiness",
+    ]
+    for key in keys:
+        assert bounded_latest[key] == full_latest[key]
+
 def main():
     test_contiguous_history_is_ready()
     test_gap_invalidates_24h_but_keeps_clean_6h_window()
     test_oversized_window_is_not_interpolated()
     test_previous_velocity_is_invalid_after_large_gap()
+    test_bounded_inventory_selection_keeps_first_and_recent_window()
+    test_bounded_history_preserves_latest_live_features()
     print("SUCCESS")
 
 
