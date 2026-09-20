@@ -140,21 +140,15 @@ def load_snapshot_context(ticket_event_id):
 
 
 def select_inventory_snapshot_ids(context_rows, lookback_hours=LIVE_FEATURE_LOOKBACK_HOURS):
-    if not context_rows:
-        return []
-
-    ordered = sorted(
-        context_rows,
-        key=lambda row: parse_timestamp(row.get("captured_at")) or datetime.min,
-    )
     valid = [
         row
-        for row in ordered
+        for row in context_rows
         if parse_timestamp(row.get("captured_at")) is not None
     ]
     if not valid:
         return []
 
+    valid.sort(key=lambda row: parse_timestamp(row["captured_at"]))
     latest_at = parse_timestamp(valid[-1]["captured_at"])
     cutoff = latest_at - timedelta(hours=lookback_hours)
 
