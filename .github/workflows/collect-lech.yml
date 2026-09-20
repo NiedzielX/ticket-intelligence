@@ -43,11 +43,12 @@ on:
       - sql/snapshot_event_context_v01.sql
       - .github/workflows/collect-lech.yml
   schedule:
-    - cron: "7 */4 * * *"
+    - cron: "7 */2 * * *"
 
 concurrency:
   group: lech-ticket-intelligence-${{ github.event_name == 'pull_request' && 'pr-validation-v03' || 'production-v03' }}
-  cancel-in-progress: true
+  # Scheduled leases queue behind an active lease; push/manual deploys replace stale code immediately.
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 permissions:
   contents: read
