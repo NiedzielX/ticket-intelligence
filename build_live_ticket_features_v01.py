@@ -19,6 +19,7 @@ TRANSIENT_JUMP_THRESHOLD = int(os.getenv("TRANSIENT_JUMP_THRESHOLD", "500"))
 TRANSIENT_RETURN_TOLERANCE = int(os.getenv("TRANSIENT_RETURN_TOLERANCE", "100"))
 SNAPSHOT_GAP_THRESHOLD_HOURS = float(os.getenv("SNAPSHOT_GAP_THRESHOLD_HOURS", "2.5"))
 WINDOW_MAX_OVERSHOOT_HOURS = float(os.getenv("WINDOW_MAX_OVERSHOOT_HOURS", "2.5"))
+LIVE_FEATURE_LOOKBACK_HOURS = float(os.getenv("LIVE_FEATURE_LOOKBACK_HOURS", "30"))
 
 
 def api_get_all(path):
@@ -136,6 +137,31 @@ def load_snapshot_context(ticket_event_id):
         )
 
     return context
+
+
+def select_inventory_snapshot_ids(context_rows, lookback_hours=LIVE_FEATURE_LOOKBACK_HOURS):
+    valid = [
+        row
+        for row in context_rows
+        if parse_timestamp(row.get("captured_at")) is not None
+    ]
+    if not valid:
+        return []
+
+    valid.sort(key=lambda row: parse_timestamp(row["captured_at"]))
+    latest_at = parse_timestamp(valid[-1]["captured_at"])
+    cutoff = latest_at - timedelta(hours=lookback_hours)
+
+    selected = {
+        int(row["snapshot_id"])
+        for row in valid
+        if parse_timestamp(row["captured_at"]) >= cutoff
+    }
+
+    # Keep the first observation as the full-event demand baseline while bounding
+    # rolling-window inventory reads to the recent lookback.
+    selected.add(int(valid[0]["snapshot_id"]))
+    return sorted(selected)
 
 
 def load_inventory(snapshot_ids):
@@ -483,7 +509,7 @@ def write_outputs(ticket_event, raw_snapshot_count, features, anomaly_rows):
 def main():
     ticket_event = resolve_ticket_event()
     context_rows = load_snapshot_context(ticket_event["id"])
-    snapshot_ids = [row["snapshot_id"] for row in context_rows]
+    snapshot_ids = select_inventory_snapshot_ids(context_rows)
     inventory_rows = load_inventory(snapshot_ids)
     totals, sector_counts = aggregate_available(inventory_rows)
     raw_records = build_records(context_rows, totals, sector_counts)
@@ -498,7 +524,7 @@ def main():
     features = calculate_features(clean_records)
     csv_path, anomaly_path, latest_path = write_outputs(
         ticket_event,
-        len(raw_records),
+        len(context_rows),
         features,
         anomaly_rows,
     )
@@ -509,7 +535,8 @@ def main():
         f"Event {EVENT_PROVIDER}:{EVENT_ID} — "
         f"{ticket_event['home_team']} vs {ticket_event['away_team']}"
     )
-    print(f"Raw linked snapshots: {len(raw_records)}")
+    print(f"Raw linked snapshots: {len(context_rows)}")
+    print(f"Inventory snapshots loaded: {len(snapshot_ids)}")
     print(f"Feature snapshots: {len(features)}")
     print(f"Excluded transient spikes: {len(anomaly_rows)}")
     print(f"Latest hours to kickoff: {latest['hours_to_kickoff']}")
