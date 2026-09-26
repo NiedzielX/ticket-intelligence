@@ -18,6 +18,7 @@ on:
       - persist_forecast_observation_v01.py
       - run_active_event_intelligence_v01.py
       - test_run_active_event_intelligence_v01.py
+      - test_discover_roboticket_events_v01.py
       - test_live_ticket_features_v01.py
       - test_forecast_live_quality_v01.py
       - sql/snapshot_event_context_v01.sql
@@ -38,6 +39,7 @@ on:
       - persist_forecast_observation_v01.py
       - run_active_event_intelligence_v01.py
       - test_run_active_event_intelligence_v01.py
+      - test_discover_roboticket_events_v01.py
       - test_live_ticket_features_v01.py
       - test_forecast_live_quality_v01.py
       - sql/snapshot_event_context_v01.sql
@@ -69,6 +71,7 @@ jobs:
       - name: Validate orchestration code
         run: |
           python test_run_active_event_intelligence_v01.py
+          python test_discover_roboticket_events_v01.py
           python test_live_ticket_features_v01.py
           python test_forecast_live_quality_v01.py
           python -m py_compile \

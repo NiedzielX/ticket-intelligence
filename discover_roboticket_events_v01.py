@@ -10,7 +10,6 @@ from urllib import error, parse, request
 from urllib.parse import parse_qs, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
-from playwright.async_api import async_playwright
 
 
 ROBOTICKET_URL = "https://bilety.lechpoznan.pl/"
@@ -232,18 +231,65 @@ def match_schedule(events, schedule_items):
     return resolved, unresolved
 
 
-def apply_competition_mapping(resolved, existing_events):
+def competition_icon_key(value):
+    if not value:
+        return None
+    try:
+        path = urlparse(value).path
+    except Exception:
+        path = value
+    return (path or value).lower()
+
+
+def historical_icon_competition_map(existing_events, schedule_items):
+    icon_to_competitions = {}
+
+    for existing in existing_events:
+        competition = normalize_space(existing.get("competition"))
+        opponent = normalize_space(existing.get("away_team"))
+        match_date = existing.get("match_date")
+        if not competition or not opponent or not match_date:
+            continue
+
+        matching_fixtures = []
+        for item in schedule_items:
+            fixture = parse_schedule_fixture(item, opponent)
+            if fixture and fixture.get("match_date") == match_date:
+                matching_fixtures.append(fixture)
+
+        if len(matching_fixtures) != 1:
+            continue
+
+        icon = competition_icon_key(matching_fixtures[0].get("competition_icon"))
+        if icon:
+            icon_to_competitions.setdefault(icon, set()).add(competition)
+
+    return {
+        icon: next(iter(values))
+        for icon, values in icon_to_competitions.items()
+        if len(values) == 1
+    }
+
+
+def apply_competition_mapping(resolved, existing_events, schedule_items):
     existing_by_id = {
         str(row.get("external_event_id")): row
         for row in existing_events
         if row.get("external_event_id") is not None
     }
-    icon_to_competitions = {}
 
+    icon_map = historical_icon_competition_map(existing_events, schedule_items)
+
+    # Preserve a known canonical competition for an event that is still active,
+    # and use it as an additional icon signal when available.
+    icon_to_competitions = {
+        icon: {competition}
+        for icon, competition in icon_map.items()
+    }
     for event in resolved:
         existing = existing_by_id.get(event["id"])
-        competition = (existing or {}).get("competition")
-        icon = event.get("competition_icon")
+        competition = normalize_space((existing or {}).get("competition"))
+        icon = competition_icon_key(event.get("competition_icon"))
         if competition and icon:
             icon_to_competitions.setdefault(icon, set()).add(competition)
 
@@ -255,7 +301,10 @@ def apply_competition_mapping(resolved, existing_events):
 
     matrix = []
     for event in resolved:
-        competition = icon_map.get(event.get("competition_icon"))
+        existing = existing_by_id.get(event["id"])
+        existing_competition = normalize_space((existing or {}).get("competition"))
+        icon = competition_icon_key(event.get("competition_icon"))
+        competition = existing_competition or icon_map.get(icon)
         matrix.append(
             {
                 "id": event["id"],
@@ -274,6 +323,8 @@ def apply_competition_mapping(resolved, existing_events):
 
 
 async def main():
+    from playwright.async_api import async_playwright
+
     OUT.mkdir(parents=True, exist_ok=True)
     existing_events = api_get_ticket_events()
 
@@ -293,7 +344,7 @@ async def main():
         events = await discover_roboticket(roboticket_page)
         schedule_items = await load_schedule_items(schedule_page)
         resolved, unresolved = match_schedule(events, schedule_items)
-        matrix, icon_map = apply_competition_mapping(resolved, existing_events)
+        matrix, icon_map = apply_competition_mapping(resolved, existing_events, schedule_items)
 
         MATRIX_PATH.write_text(
             json.dumps(matrix, ensure_ascii=False, separators=(",", ":")),
