@@ -76,7 +76,7 @@ def parse_schedule_fixture(item, opponent):
     opponent_pattern = re.escape(opponent)
     pattern = re.compile(
         rf"(?P<day>\d{{2}})\s*\|\s*(?P<month>\d{{2}})\s*\|\s*(?P<year>\d{{4}})\s+"
-        rf"(?P<hour>\d{{2}}):(?P<minute>\d{{2}})\s+Lech Poznań\s+-:-\s+{opponent_pattern}(?:\s|$)",
+        rf"(?P<hour>\d{{2}}):(?P<minute>\d{{2}})\s+Lech Poznań\s+(?:-:-|\d+\s*:\s*\d+)\s+{opponent_pattern}(?:\s|$)",
         re.IGNORECASE,
     )
     match = pattern.search(text)
