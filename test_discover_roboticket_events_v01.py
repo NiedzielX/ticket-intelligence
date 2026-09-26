@@ -41,7 +41,7 @@ def test_historical_fixture_teaches_competition_for_new_event():
     new_icon = "https://www.lechpoznan.pl/media/rth_0x21_ekstraklasa.png?v=2"
     schedule_items = [
         schedule_item(
-            "20 | 09 | 2026 20:15 Lech Poznań -:- Radomiak Radom",
+            "20 | 09 | 2026 20:15 Lech Poznań 5:1 Radomiak Radom",
             old_icon,
         ),
         schedule_item(
