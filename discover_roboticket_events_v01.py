@@ -10,7 +10,6 @@ from urllib import error, parse, request
 from urllib.parse import parse_qs, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
-from playwright.async_api import async_playwright
 
 
 ROBOTICKET_URL = "https://bilety.lechpoznan.pl/"
@@ -324,6 +323,8 @@ def apply_competition_mapping(resolved, existing_events, schedule_items):
 
 
 async def main():
+    from playwright.async_api import async_playwright
+
     OUT.mkdir(parents=True, exist_ok=True)
     existing_events = api_get_ticket_events()
 
