@@ -230,6 +230,15 @@ def build_records(context_rows, totals, sector_counts):
     return records
 
 
+def load_feature_records(ticket_event_id):
+    context_rows = load_snapshot_context(ticket_event_id)
+    snapshot_ids = select_inventory_snapshot_ids(context_rows)
+    inventory_rows = load_inventory(snapshot_ids)
+    totals, sector_counts = aggregate_available(inventory_rows)
+    raw_records = build_records(context_rows, totals, sector_counts)
+    return context_rows, snapshot_ids, raw_records
+
+
 def detect_transient_spikes(records):
     excluded_ids = set()
     anomaly_rows = []
@@ -522,11 +531,7 @@ def write_outputs(ticket_event, raw_snapshot_count, features, anomaly_rows):
 
 def main():
     ticket_event = resolve_ticket_event()
-    context_rows = load_snapshot_context(ticket_event["id"])
-    snapshot_ids = select_inventory_snapshot_ids(context_rows)
-    inventory_rows = load_inventory(snapshot_ids)
-    totals, sector_counts = aggregate_available(inventory_rows)
-    raw_records = build_records(context_rows, totals, sector_counts)
+    context_rows, snapshot_ids, raw_records = load_feature_records(ticket_event["id"])
     excluded_ids, anomaly_rows = detect_transient_spikes(raw_records)
     clean_records = [
         record for record in raw_records if record["snapshot_id"] not in excluded_ids
