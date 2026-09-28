@@ -133,6 +133,28 @@ def test_bounded_history_preserves_latest_live_features():
     for key in keys:
         assert bounded_latest[key] == full_latest[key]
 
+
+def test_transient_spike_detection_does_not_cross_bounded_history_gap():
+    bounded_records = [
+        record(1, 0, 20000),
+        record(43, 42, 19000),
+        record(44, 43, 20000),
+    ]
+    excluded, anomalies = live.detect_transient_spikes(bounded_records)
+
+    assert excluded == set()
+    assert anomalies == []
+
+    contiguous_records = [
+        record(1, 0, 20000),
+        record(2, 1, 19000),
+        record(3, 2, 20000),
+    ]
+    excluded, anomalies = live.detect_transient_spikes(contiguous_records)
+
+    assert excluded == {2}
+    assert len(anomalies) == 1
+
 def main():
     test_contiguous_history_is_ready()
     test_gap_invalidates_24h_but_keeps_clean_6h_window()
@@ -140,6 +162,7 @@ def main():
     test_previous_velocity_is_invalid_after_large_gap()
     test_bounded_inventory_selection_keeps_first_and_recent_window()
     test_bounded_history_preserves_latest_live_features()
+    test_transient_spike_detection_does_not_cross_bounded_history_gap()
     print("SUCCESS")
 
 
