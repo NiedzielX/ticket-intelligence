@@ -91,11 +91,116 @@ def test_previous_velocity_is_invalid_after_large_gap():
     assert latest["signal_readiness"] == "data_gap"
 
 
+
+def test_bounded_inventory_selection_keeps_first_and_recent_window():
+    records = [record(hour + 1, hour, 20000 - 50 * hour) for hour in range(73)]
+    selected = live.select_inventory_snapshot_ids(records, lookback_hours=30)
+
+    assert 1 in selected
+    assert 43 in selected
+    assert 42 not in selected
+    assert 73 in selected
+    assert len(selected) == 32
+
+
+def test_bounded_history_preserves_latest_live_features():
+    records = [record(hour + 1, hour, 20000 - 50 * hour) for hour in range(73)]
+    full_latest = live.calculate_features(records)[-1]
+
+    selected_ids = set(
+        live.select_inventory_snapshot_ids(records, lookback_hours=30)
+    )
+    bounded_records = [
+        row for row in records if row["snapshot_id"] in selected_ids
+    ]
+    bounded_latest = live.calculate_features(bounded_records)[-1]
+
+    keys = [
+        "history_hours",
+        "available_total",
+        "first_available_total",
+        "available_index",
+        "net_removed_since_first",
+        "inventory_velocity_since_previous",
+        "inventory_velocity_6h",
+        "inventory_velocity_24h",
+        "inventory_acceleration_6h_vs_24h",
+        "window_6h_quality_status",
+        "window_24h_quality_status",
+        "data_gap_detected",
+        "signal_readiness",
+    ]
+    for key in keys:
+        assert bounded_latest[key] == full_latest[key]
+
+
+def test_transient_spike_detection_does_not_cross_bounded_history_gap():
+    bounded_records = [
+        record(1, 0, 20000),
+        record(43, 42, 19000),
+        record(44, 43, 20000),
+    ]
+    excluded, anomalies = live.detect_transient_spikes(bounded_records)
+
+    assert excluded == set()
+    assert anomalies == []
+
+    contiguous_records = [
+        record(1, 0, 20000),
+        record(2, 1, 19000),
+        record(3, 2, 20000),
+    ]
+    excluded, anomalies = live.detect_transient_spikes(contiguous_records)
+
+    assert excluded == {2}
+    assert len(anomalies) == 1
+
+
+def test_feature_loader_uses_bounded_inventory_selection():
+    context = [record(hour + 1, hour, 20000 - 50 * hour) for hour in range(73)]
+    available_by_id = {
+        row["snapshot_id"]: row["available_total"]
+        for row in context
+    }
+    loaded_ids = []
+
+    original_context_loader = live.load_snapshot_context
+    original_inventory_loader = live.load_inventory
+    try:
+        live.load_snapshot_context = lambda ticket_event_id: context
+
+        def fake_load_inventory(snapshot_ids):
+            loaded_ids.extend(snapshot_ids)
+            return [
+                {
+                    "snapshot_id": snapshot_id,
+                    "sector": "A",
+                    "available": available_by_id[snapshot_id],
+                }
+                for snapshot_id in snapshot_ids
+            ]
+
+        live.load_inventory = fake_load_inventory
+        loaded_context, snapshot_ids, raw_records = live.load_feature_records(1)
+    finally:
+        live.load_snapshot_context = original_context_loader
+        live.load_inventory = original_inventory_loader
+
+    expected_ids = live.select_inventory_snapshot_ids(context)
+    assert loaded_context == context
+    assert snapshot_ids == expected_ids
+    assert loaded_ids == expected_ids
+    assert [row["snapshot_id"] for row in raw_records] == expected_ids
+
 def main():
     test_contiguous_history_is_ready()
     test_gap_invalidates_24h_but_keeps_clean_6h_window()
     test_oversized_window_is_not_interpolated()
     test_previous_velocity_is_invalid_after_large_gap()
+    test_bounded_inventory_selection_keeps_first_and_recent_window()
+    test_bounded_history_preserves_latest_live_features()
+    test_transient_spike_detection_does_not_cross_bounded_history_gap()
+    test_feature_loader_uses_bounded_inventory_selection()
     print("SUCCESS")
 
 

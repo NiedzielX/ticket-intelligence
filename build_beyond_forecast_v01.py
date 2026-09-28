@@ -311,10 +311,7 @@ def historical_forecast(event):
 
 
 def live_signal(event):
-    context = live_v01.load_snapshot_context(event["id"])
-    inventory = live_v01.load_inventory([r["snapshot_id"] for r in context])
-    totals, counts = live_v01.aggregate_available(inventory)
-    raw = live_v01.build_records(context, totals, counts)
+    context, snapshot_ids, raw = live_v01.load_feature_records(event["id"])
     excluded, anomalies = live_v01.detect_transient_spikes(raw)
     clean = [r for r in raw if r["snapshot_id"] not in excluded]
     latest = live_v01.calculate_features(clean)[-1]
@@ -328,7 +325,8 @@ def live_signal(event):
     ]
     return {
         **{k: latest.get(k) for k in keys},
-        "raw_snapshot_count": len(raw),
+        "raw_snapshot_count": len(context),
+        "inventory_snapshot_count": len(snapshot_ids),
         "clean_snapshot_count": len(clean),
         "excluded_anomaly_count": len(anomalies),
         "inventory_interpretation": "demand_proxy_not_confirmed_sales",

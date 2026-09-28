@@ -19,6 +19,7 @@ TRANSIENT_JUMP_THRESHOLD = int(os.getenv("TRANSIENT_JUMP_THRESHOLD", "500"))
 TRANSIENT_RETURN_TOLERANCE = int(os.getenv("TRANSIENT_RETURN_TOLERANCE", "100"))
 SNAPSHOT_GAP_THRESHOLD_HOURS = float(os.getenv("SNAPSHOT_GAP_THRESHOLD_HOURS", "2.5"))
 WINDOW_MAX_OVERSHOOT_HOURS = float(os.getenv("WINDOW_MAX_OVERSHOOT_HOURS", "2.5"))
+LIVE_FEATURE_LOOKBACK_HOURS = float(os.getenv("LIVE_FEATURE_LOOKBACK_HOURS", "30"))
 
 
 def api_get_all(path):
@@ -138,6 +139,31 @@ def load_snapshot_context(ticket_event_id):
     return context
 
 
+def select_inventory_snapshot_ids(context_rows, lookback_hours=LIVE_FEATURE_LOOKBACK_HOURS):
+    valid = [
+        row
+        for row in context_rows
+        if parse_timestamp(row.get("captured_at")) is not None
+    ]
+    if not valid:
+        return []
+
+    valid.sort(key=lambda row: parse_timestamp(row["captured_at"]))
+    latest_at = parse_timestamp(valid[-1]["captured_at"])
+    cutoff = latest_at - timedelta(hours=lookback_hours)
+
+    selected = {
+        int(row["snapshot_id"])
+        for row in valid
+        if parse_timestamp(row["captured_at"]) >= cutoff
+    }
+
+    # Keep the first observation as the full-event demand baseline while bounding
+    # rolling-window inventory reads to the recent lookback.
+    selected.add(int(valid[0]["snapshot_id"]))
+    return sorted(selected)
+
+
 def load_inventory(snapshot_ids):
     if not snapshot_ids:
         return []
@@ -204,6 +230,15 @@ def build_records(context_rows, totals, sector_counts):
     return records
 
 
+def load_feature_records(ticket_event_id):
+    context_rows = load_snapshot_context(ticket_event_id)
+    snapshot_ids = select_inventory_snapshot_ids(context_rows)
+    inventory_rows = load_inventory(snapshot_ids)
+    totals, sector_counts = aggregate_available(inventory_rows)
+    raw_records = build_records(context_rows, totals, sector_counts)
+    return context_rows, snapshot_ids, raw_records
+
+
 def detect_transient_spikes(records):
     excluded_ids = set()
     anomaly_rows = []
@@ -212,6 +247,19 @@ def detect_transient_spikes(records):
         previous = records[index - 1]
         current = records[index]
         following = records[index + 1]
+
+        previous_gap_hours = hours_between(
+            current["_captured_at"],
+            previous["_captured_at"],
+        )
+        following_gap_hours = hours_between(
+            following["_captured_at"],
+            current["_captured_at"],
+        )
+        contiguous_triplet = (
+            previous_gap_hours <= SNAPSHOT_GAP_THRESHOLD_HOURS
+            and following_gap_hours <= SNAPSHOT_GAP_THRESHOLD_HOURS
+        )
 
         jump_in = current["available_total"] - previous["available_total"]
         jump_out = following["available_total"] - current["available_total"]
@@ -222,7 +270,8 @@ def detect_transient_spikes(records):
         reversed_direction = jump_in * jump_out < 0
 
         if (
-            abs(jump_in) >= TRANSIENT_JUMP_THRESHOLD
+            contiguous_triplet
+            and abs(jump_in) >= TRANSIENT_JUMP_THRESHOLD
             and abs(jump_out) >= TRANSIENT_JUMP_THRESHOLD
             and reversed_direction
             and returned_close
@@ -482,11 +531,7 @@ def write_outputs(ticket_event, raw_snapshot_count, features, anomaly_rows):
 
 def main():
     ticket_event = resolve_ticket_event()
-    context_rows = load_snapshot_context(ticket_event["id"])
-    snapshot_ids = [row["snapshot_id"] for row in context_rows]
-    inventory_rows = load_inventory(snapshot_ids)
-    totals, sector_counts = aggregate_available(inventory_rows)
-    raw_records = build_records(context_rows, totals, sector_counts)
+    context_rows, snapshot_ids, raw_records = load_feature_records(ticket_event["id"])
     excluded_ids, anomaly_rows = detect_transient_spikes(raw_records)
     clean_records = [
         record for record in raw_records if record["snapshot_id"] not in excluded_ids
@@ -498,7 +543,7 @@ def main():
     features = calculate_features(clean_records)
     csv_path, anomaly_path, latest_path = write_outputs(
         ticket_event,
-        len(raw_records),
+        len(context_rows),
         features,
         anomaly_rows,
     )
@@ -509,7 +554,8 @@ def main():
         f"Event {EVENT_PROVIDER}:{EVENT_ID} — "
         f"{ticket_event['home_team']} vs {ticket_event['away_team']}"
     )
-    print(f"Raw linked snapshots: {len(raw_records)}")
+    print(f"Raw linked snapshots: {len(context_rows)}")
+    print(f"Inventory snapshots loaded: {len(snapshot_ids)}")
     print(f"Feature snapshots: {len(features)}")
     print(f"Excluded transient spikes: {len(anomaly_rows)}")
     print(f"Latest hours to kickoff: {latest['hours_to_kickoff']}")
