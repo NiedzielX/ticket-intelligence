@@ -239,6 +239,19 @@ def detect_transient_spikes(records):
         current = records[index]
         following = records[index + 1]
 
+        previous_gap_hours = hours_between(
+            current["_captured_at"],
+            previous["_captured_at"],
+        )
+        following_gap_hours = hours_between(
+            following["_captured_at"],
+            current["_captured_at"],
+        )
+        contiguous_triplet = (
+            previous_gap_hours <= SNAPSHOT_GAP_THRESHOLD_HOURS
+            and following_gap_hours <= SNAPSHOT_GAP_THRESHOLD_HOURS
+        )
+
         jump_in = current["available_total"] - previous["available_total"]
         jump_out = following["available_total"] - current["available_total"]
         returned_close = (
@@ -248,7 +261,8 @@ def detect_transient_spikes(records):
         reversed_direction = jump_in * jump_out < 0
 
         if (
-            abs(jump_in) >= TRANSIENT_JUMP_THRESHOLD
+            contiguous_triplet
+            and abs(jump_in) >= TRANSIENT_JUMP_THRESHOLD
             and abs(jump_out) >= TRANSIENT_JUMP_THRESHOLD
             and reversed_direction
             and returned_close
