@@ -18,7 +18,9 @@ HORIZONS = tuple(
     if value.strip()
 )
 MAX_EARLY_GAP_HOURS = float(os.getenv("HORIZON_MAX_EARLY_GAP_HOURS", "2.5"))
-MIN_CALIBRATION_EVENTS = int(os.getenv("MIN_CALIBRATION_EVENTS", "7"))
+SHADOW_FIT_MIN_EVENTS = int(os.getenv("SHADOW_FIT_MIN_EVENTS", "4"))
+SHADOW_LOEO_MIN_EVENTS = int(os.getenv("SHADOW_LOEO_MIN_EVENTS", "5"))
+ACTIVATION_REVIEW_MIN_EVENTS = int(os.getenv("ACTIVATION_REVIEW_MIN_EVENTS", "6"))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "forecast_evaluation_artifacts_v01"))
 PAGE_SIZE = 1000
 
@@ -249,11 +251,18 @@ def calibration_status(evaluation_rows):
     count = len(eligible_event_ids)
     return {
         "eligible_completed_league_events": count,
-        "minimum_required_events": MIN_CALIBRATION_EVENTS,
-        "ready_for_candidate_fit": count >= MIN_CALIBRATION_EVENTS,
+        "minimum_required_events": SHADOW_FIT_MIN_EVENTS,
+        "shadow_fit_minimum_events": SHADOW_FIT_MIN_EVENTS,
+        "loeo_minimum_events": SHADOW_LOEO_MIN_EVENTS,
+        "activation_review_minimum_events": ACTIVATION_REVIEW_MIN_EVENTS,
+        "ready_for_candidate_fit": count >= SHADOW_FIT_MIN_EVENTS,
+        "ready_for_loeo": count >= SHADOW_LOEO_MIN_EVENTS,
+        "ready_for_activation_review": count >= ACTIVATION_REVIEW_MIN_EVENTS,
+        "live_correction_active": False,
         "rule": (
-            "Do not fit or activate a live correction model until the minimum number "
-            "of distinct completed league events is available. Validation must split by event."
+            "Fit simple shadow candidates from four distinct completed league events. "
+            "Start leave-one-event-out validation from five events. Six events only opens "
+            "an activation review; production correction remains disabled."
         ),
     }
 
@@ -314,7 +323,7 @@ def main():
     print(
         "Calibration events: "
         f"{summary['calibration']['eligible_completed_league_events']}/"
-        f"{MIN_CALIBRATION_EVENTS}"
+        f"{SHADOW_FIT_MIN_EVENTS}"
     )
     print(f"Evaluation CSV: {evaluation_path}")
     print(f"Summary JSON: {summary_path}")

@@ -13,7 +13,10 @@ INPUT_DIR = Path(os.getenv("EVALUATION_INPUT_DIR", "forecast_evaluation_artifact
 OUTPUT_DIR = Path(os.getenv("CALIBRATION_OUTPUT_DIR", "calibration_report_artifacts_v01"))
 EVALUATION_CSV = INPUT_DIR / "forecast_horizon_evaluation_v01.csv"
 EVALUATION_SUMMARY_JSON = INPUT_DIR / "forecast_evaluation_summary_v01.json"
-MIN_CALIBRATION_EVENTS = int(os.getenv("MIN_CALIBRATION_EVENTS", "7"))
+SHADOW_FIT_MIN_EVENTS = int(os.getenv("SHADOW_FIT_MIN_EVENTS", "4"))
+SHADOW_LOEO_MIN_EVENTS = int(os.getenv("SHADOW_LOEO_MIN_EVENTS", "5"))
+ACTIVATION_REVIEW_MIN_EVENTS = int(os.getenv("ACTIVATION_REVIEW_MIN_EVENTS", "6"))
+SHADOW_MAX_ADJUSTMENT_RATIO = float(os.getenv("SHADOW_MAX_ADJUSTMENT_RATIO", "0.20"))
 LEAGUE_COMPETITION = os.getenv("CALIBRATION_COMPETITION", "Ekstraklasa")
 
 HORIZON_LABELS = {
@@ -159,6 +162,355 @@ def round_or_none(value, digits=4):
     return None if value is None else round(float(value), digits)
 
 
+def shadow_candidate_rows(rows, feature=None):
+    output = []
+    for row in rows:
+        if row.get("competition") != LEAGUE_COMPETITION:
+            continue
+        if row.get("historical_p50") is None or row.get("historical_residual_target") is None:
+            continue
+        if feature is not None:
+            if row.get(feature) is None:
+                continue
+            if row.get("signal_readiness") == "data_gap":
+                continue
+        output.append(row)
+    return output
+
+
+def event_balanced_weights(rows):
+    counts = defaultdict(int)
+    for row in rows:
+        counts[int(row["ticket_event_id"])] += 1
+    return [
+        1.0 / counts[int(row["ticket_event_id"])]
+        for row in rows
+    ]
+
+
+def weighted_mean(values, weights):
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        return None
+    return sum(float(value) * weight for value, weight in zip(values, weights)) / total_weight
+
+
+def fit_shadow_candidate(rows, candidate_name, minimum_events=SHADOW_FIT_MIN_EVENTS):
+    if candidate_name == "bias_only":
+        feature = None
+    elif candidate_name == "available_index_linear":
+        feature = "live_available_index"
+    else:
+        raise ValueError(f"Unknown shadow candidate: {candidate_name}")
+
+    usable = shadow_candidate_rows(rows, feature)
+    event_count = len({int(row["ticket_event_id"]) for row in usable})
+    if event_count < minimum_events:
+        return None
+
+    weights = event_balanced_weights(usable)
+    residuals = [float(row["historical_residual_target"]) for row in usable]
+    residual_mean = weighted_mean(residuals, weights)
+
+    if feature is None:
+        return {
+            "name": candidate_name,
+            "feature": None,
+            "intercept": residual_mean,
+            "slope": None,
+            "training_event_count": event_count,
+            "training_row_count": len(usable),
+            "domain_direction_ok": True,
+        }
+
+    feature_values = [float(row[feature]) for row in usable]
+    feature_mean = weighted_mean(feature_values, weights)
+    denominator = sum(
+        weight * (value - feature_mean) ** 2
+        for value, weight in zip(feature_values, weights)
+    )
+    if denominator <= 1e-12:
+        return None
+
+    numerator = sum(
+        weight * (value - feature_mean) * (residual - residual_mean)
+        for value, residual, weight in zip(feature_values, residuals, weights)
+    )
+    slope = numerator / denominator
+    intercept = residual_mean - slope * feature_mean
+    return {
+        "name": candidate_name,
+        "feature": feature,
+        "intercept": intercept,
+        "slope": slope,
+        "training_event_count": event_count,
+        "training_row_count": len(usable),
+        "domain_direction_ok": slope < 0,
+    }
+
+
+def shadow_prediction(model, row):
+    historical_p50 = float(row["historical_p50"])
+    correction = float(model["intercept"])
+    if model.get("feature"):
+        correction += float(model["slope"]) * float(row[model["feature"]])
+
+    cap = abs(historical_p50) * SHADOW_MAX_ADJUSTMENT_RATIO
+    capped_correction = max(-cap, min(cap, correction))
+    shadow_p50 = historical_p50 + capped_correction
+    actual = float(row["actual_attendance"])
+    historical_abs_error = abs(actual - historical_p50)
+    shadow_abs_error = abs(actual - shadow_p50)
+    return {
+        "raw_correction": correction,
+        "capped_correction": capped_correction,
+        "shadow_p50": shadow_p50,
+        "historical_abs_error": historical_abs_error,
+        "shadow_abs_error": shadow_abs_error,
+    }
+
+
+def score_shadow_candidate(model, rows):
+    feature = model.get("feature")
+    usable = shadow_candidate_rows(rows, feature)
+    by_event = defaultdict(list)
+    predictions = []
+
+    for row in usable:
+        prediction = shadow_prediction(model, row)
+        event_id = int(row["ticket_event_id"])
+        by_event[event_id].append(prediction)
+        predictions.append((row, prediction))
+
+    event_scores = []
+    for event_id, event_predictions in sorted(by_event.items()):
+        historical_mae = mean(
+            prediction["historical_abs_error"]
+            for prediction in event_predictions
+        )
+        shadow_mae = mean(
+            prediction["shadow_abs_error"]
+            for prediction in event_predictions
+        )
+        event_scores.append(
+            {
+                "ticket_event_id": event_id,
+                "historical_mae": historical_mae,
+                "shadow_mae": shadow_mae,
+                "mae_improvement": historical_mae - shadow_mae,
+            }
+        )
+
+    historical_mae = mean(score["historical_mae"] for score in event_scores)
+    shadow_mae = mean(score["shadow_mae"] for score in event_scores)
+    improved = sum(score["mae_improvement"] > 0 for score in event_scores)
+    worsened = sum(score["mae_improvement"] < 0 for score in event_scores)
+
+    return {
+        "event_count": len(event_scores),
+        "row_count": len(predictions),
+        "historical_mae": historical_mae,
+        "shadow_mae": shadow_mae,
+        "mae_improvement": (
+            None if historical_mae is None or shadow_mae is None
+            else historical_mae - shadow_mae
+        ),
+        "improved_event_count": improved,
+        "worsened_event_count": worsened,
+        "tied_event_count": len(event_scores) - improved - worsened,
+        "event_scores": event_scores,
+    }
+
+
+def loeo_shadow_candidate(rows, candidate_name):
+    feature = None if candidate_name == "bias_only" else "live_available_index"
+    usable = shadow_candidate_rows(rows, feature)
+    event_ids = sorted({int(row["ticket_event_id"]) for row in usable})
+    if len(event_ids) < SHADOW_LOEO_MIN_EVENTS:
+        return {
+            "status": "not_ready",
+            "event_count": len(event_ids),
+            "minimum_events": SHADOW_LOEO_MIN_EVENTS,
+            "predictions": [],
+        }
+
+    event_scores = []
+    predictions = []
+    direction_checks = []
+
+    for held_out_event_id in event_ids:
+        train_rows = [
+            row for row in usable
+            if int(row["ticket_event_id"]) != held_out_event_id
+        ]
+        test_rows = [
+            row for row in usable
+            if int(row["ticket_event_id"]) == held_out_event_id
+        ]
+        model = fit_shadow_candidate(
+            train_rows,
+            candidate_name,
+            minimum_events=SHADOW_FIT_MIN_EVENTS,
+        )
+        if model is None:
+            continue
+        direction_checks.append(bool(model.get("domain_direction_ok", True)))
+
+        fold_predictions = []
+        for row in test_rows:
+            prediction = shadow_prediction(model, row)
+            fold_predictions.append(prediction)
+            predictions.append(
+                {
+                    "candidate": candidate_name,
+                    "ticket_event_id": held_out_event_id,
+                    "target_horizon_hours": int(row["target_horizon_hours"]),
+                    "historical_p50": int(row["historical_p50"]),
+                    "actual_attendance": int(row["actual_attendance"]),
+                    "raw_correction": round_or_none(prediction["raw_correction"], 2),
+                    "capped_correction": round_or_none(prediction["capped_correction"], 2),
+                    "shadow_p50": round_or_none(prediction["shadow_p50"], 2),
+                    "historical_abs_error": round_or_none(prediction["historical_abs_error"], 2),
+                    "shadow_abs_error": round_or_none(prediction["shadow_abs_error"], 2),
+                    "fold_training_event_count": int(model["training_event_count"]),
+                    "fold_intercept": round_or_none(model["intercept"], 4),
+                    "fold_slope": round_or_none(model.get("slope"), 4),
+                }
+            )
+
+        historical_mae = mean(
+            prediction["historical_abs_error"]
+            for prediction in fold_predictions
+        )
+        shadow_mae = mean(
+            prediction["shadow_abs_error"]
+            for prediction in fold_predictions
+        )
+        event_scores.append(
+            {
+                "ticket_event_id": held_out_event_id,
+                "historical_mae": historical_mae,
+                "shadow_mae": shadow_mae,
+                "mae_improvement": historical_mae - shadow_mae,
+            }
+        )
+
+    historical_mae = mean(score["historical_mae"] for score in event_scores)
+    shadow_mae = mean(score["shadow_mae"] for score in event_scores)
+    improved = sum(score["mae_improvement"] > 0 for score in event_scores)
+    worsened = sum(score["mae_improvement"] < 0 for score in event_scores)
+    direction_consistent = all(direction_checks) if direction_checks else False
+    improvement = (
+        None if historical_mae is None or shadow_mae is None
+        else historical_mae - shadow_mae
+    )
+    passes_guardrails = bool(
+        improvement is not None
+        and improvement > 0
+        and improved > worsened
+        and (candidate_name != "available_index_linear" or direction_consistent)
+    )
+
+    return {
+        "status": "ready",
+        "event_count": len(event_scores),
+        "minimum_events": SHADOW_LOEO_MIN_EVENTS,
+        "historical_mae": historical_mae,
+        "shadow_mae": shadow_mae,
+        "mae_improvement": improvement,
+        "improved_event_count": improved,
+        "worsened_event_count": worsened,
+        "tied_event_count": len(event_scores) - improved - worsened,
+        "domain_direction_consistent_across_folds": direction_consistent,
+        "passes_shadow_guardrails": passes_guardrails,
+        "event_scores": event_scores,
+        "predictions": predictions,
+    }
+
+
+def build_shadow_candidates(rows, eligible_event_count):
+    candidate_names = ["bias_only", "available_index_linear"]
+    candidates = []
+    all_predictions = []
+
+    if eligible_event_count < SHADOW_FIT_MIN_EVENTS:
+        return {
+            "status": "not_ready",
+            "fit_minimum_events": SHADOW_FIT_MIN_EVENTS,
+            "loeo_minimum_events": SHADOW_LOEO_MIN_EVENTS,
+            "activation_review_minimum_events": ACTIVATION_REVIEW_MIN_EVENTS,
+            "max_adjustment_ratio": SHADOW_MAX_ADJUSTMENT_RATIO,
+            "production_live_correction_active": False,
+            "preferred_shadow_candidate": None,
+            "activation_review_ready": False,
+            "candidates": [],
+            "loeo_predictions": [],
+        }
+
+    for candidate_name in candidate_names:
+        model = fit_shadow_candidate(rows, candidate_name)
+        if model is None:
+            continue
+        in_sample = score_shadow_candidate(model, rows)
+        loeo = loeo_shadow_candidate(rows, candidate_name)
+        all_predictions.extend(loeo.get("predictions", []))
+        candidates.append(
+            {
+                "name": candidate_name,
+                "feature": model.get("feature"),
+                "intercept": round_or_none(model.get("intercept"), 4),
+                "slope": round_or_none(model.get("slope"), 4),
+                "domain_direction_ok": model.get("domain_direction_ok"),
+                "training_event_count": model.get("training_event_count"),
+                "training_row_count": model.get("training_row_count"),
+                "in_sample": {
+                    key: round_or_none(value, 2) if isinstance(value, float) else value
+                    for key, value in in_sample.items()
+                    if key != "event_scores"
+                },
+                "loeo": {
+                    key: round_or_none(value, 2) if isinstance(value, float) else value
+                    for key, value in loeo.items()
+                    if key not in {"event_scores", "predictions"}
+                },
+            }
+        )
+
+    eligible_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.get("loeo", {}).get("passes_shadow_guardrails")
+    ]
+    preferred = None
+    if eligible_candidates:
+        preferred = min(
+            eligible_candidates,
+            key=lambda candidate: candidate["loeo"]["shadow_mae"],
+        )["name"]
+
+    activation_review_ready = bool(
+        eligible_event_count >= ACTIVATION_REVIEW_MIN_EVENTS
+        and preferred is not None
+    )
+
+    return {
+        "status": (
+            "loeo_ready"
+            if eligible_event_count >= SHADOW_LOEO_MIN_EVENTS
+            else "fit_ready"
+        ),
+        "fit_minimum_events": SHADOW_FIT_MIN_EVENTS,
+        "loeo_minimum_events": SHADOW_LOEO_MIN_EVENTS,
+        "activation_review_minimum_events": ACTIVATION_REVIEW_MIN_EVENTS,
+        "max_adjustment_ratio": SHADOW_MAX_ADJUSTMENT_RATIO,
+        "production_live_correction_active": False,
+        "preferred_shadow_candidate": preferred,
+        "activation_review_ready": activation_review_ready,
+        "candidates": candidates,
+        "loeo_predictions": all_predictions,
+    }
+
+
 def interval_coverage(row, prefix="historical"):
     low = row.get(f"{prefix}_p10")
     high = row.get(f"{prefix}_p90")
@@ -284,7 +636,7 @@ def build_signal_relationships(rows, eligible_event_count):
     for row in league_rows:
         grouped[int(row["target_horizon_hours"])].append(row)
 
-    ready = eligible_event_count >= MIN_CALIBRATION_EVENTS
+    ready = eligible_event_count >= SHADOW_FIT_MIN_EVENTS
     output = []
     for target_hours in sorted(grouped.keys(), reverse=True):
         horizon_rows = grouped[target_hours]
@@ -299,7 +651,7 @@ def build_signal_relationships(rows, eligible_event_count):
             correlation = None
             direction_match = None
             status = "insufficient_sample"
-            if ready and distinct_events >= MIN_CALIBRATION_EVENTS and len(pairs) >= MIN_CALIBRATION_EVENTS:
+            if ready and distinct_events >= SHADOW_FIT_MIN_EVENTS and len(pairs) >= SHADOW_FIT_MIN_EVENTS:
                 correlation = pearson(
                     [row.get(feature_name) for row in pairs],
                     [row.get("historical_residual_target") for row in pairs],
@@ -375,6 +727,7 @@ def fmt_bool(value):
 
 def build_markdown(report):
     calibration = report["calibration"]
+    shadow = report.get("shadow_live_correction", {})
     lines = [
         "# Beyond Ticketing — Calibration Report v0.1",
         "",
@@ -382,11 +735,15 @@ def build_markdown(report):
         "",
         "## Calibration status",
         "",
-        f"Completed eligible league events: **{calibration['eligible_completed_league_events']} / {calibration['minimum_required_events']}**",
+        f"Completed eligible league events: **{calibration['eligible_completed_league_events']}**",
         "",
-        f"Candidate live-correction fit: **{'READY' if calibration['ready_for_candidate_fit'] else 'NOT READY'}**",
+        f"Shadow fit gate: **{calibration['eligible_completed_league_events']} / {calibration['shadow_fit_minimum_events']} — {'READY' if calibration['ready_for_candidate_fit'] else 'NOT READY'}**",
+        f"LOEO gate: **{calibration['eligible_completed_league_events']} / {calibration['loeo_minimum_events']} — {'READY' if calibration['ready_for_loeo'] else 'NOT READY'}**",
+        f"Activation review gate: **{calibration['eligible_completed_league_events']} / {calibration['activation_review_minimum_events']} — {'READY' if shadow.get('activation_review_ready') else 'NOT READY'}**",
         "",
-        "Live inventory is still a demand proxy, not confirmed ticket sales. No live correction is activated by this report.",
+        "Production live correction: **OFF**",
+        "",
+        "Live inventory is still a demand proxy, not confirmed ticket sales. Shadow candidates never change production P50.",
         "",
     ]
 
@@ -470,12 +827,61 @@ def build_markdown(report):
                 f"| {row['horizon']} | {row['feature_label']} | {row['pair_count']} | {fmt_number(row.get('pearson_correlation_with_historical_residual'), 3)} | {fmt_bool(row.get('correlation_sign_matches_domain_expectation'))} |"
             )
 
+    lines.extend(["", "## Shadow live-correction candidates", ""])
+    if shadow.get("status") == "not_ready":
+        lines.append(
+            f"No candidate is fitted yet. First shadow fit starts at {shadow.get('fit_minimum_events', SHADOW_FIT_MIN_EVENTS)} completed league events."
+        )
+    else:
+        lines.extend(
+            [
+                f"Correction cap: **±{float(shadow.get('max_adjustment_ratio', SHADOW_MAX_ADJUSTMENT_RATIO)) * 100:.0f}% of historical P50**.",
+                "Candidates are event-balanced. In-sample results are exploratory; LOEO is the first out-of-sample gate.",
+                "",
+                "| Candidate | Train events | In-sample MAE | LOEO MAE | LOEO improvement | Events improved/worsened | Guardrails |",
+                "|---|---:|---:|---:|---:|---:|---|",
+            ]
+        )
+        for candidate in shadow.get("candidates", []):
+            in_sample = candidate.get("in_sample", {})
+            loeo = candidate.get("loeo", {})
+            loeo_ready = loeo.get("status") == "ready"
+            guardrails = (
+                fmt_bool(loeo.get("passes_shadow_guardrails"))
+                if loeo_ready
+                else "not ready"
+            )
+            improved_worsened = (
+                f"{loeo.get('improved_event_count', 0)}/{loeo.get('worsened_event_count', 0)}"
+                if loeo_ready
+                else "—"
+            )
+            lines.append(
+                "| {name} | {events} | {in_mae} | {loeo_mae} | {improvement} | {iw} | {guardrails} |".format(
+                    name=candidate["name"],
+                    events=candidate.get("training_event_count", "—"),
+                    in_mae=fmt_number(in_sample.get("shadow_mae")),
+                    loeo_mae=fmt_number(loeo.get("shadow_mae")),
+                    improvement=fmt_number(loeo.get("mae_improvement")),
+                    iw=improved_worsened,
+                    guardrails=guardrails,
+                )
+            )
+        lines.extend(
+            [
+                "",
+                f"Preferred shadow candidate: **{shadow.get('preferred_shadow_candidate') or 'none yet'}**",
+                "",
+            ]
+        )
+
     lines.extend(
         [
             "",
             "## Decision rule",
             "",
-            "Do not activate Live Correction from this report alone. A candidate model is considered only after the minimum event gate is met and must beat the historical-only baseline on event-level out-of-sample validation.",
+            "Four completed league events allow exploratory shadow fitting. Five allow leave-one-event-out validation with complete events held out. Six only opens an activation review; it does not activate anything automatically.",
+            "A shadow candidate must improve event-level LOEO MAE, improve more held-out events than it worsens, and respect its domain-direction guardrail. Production P50 remains historical until a separate activation decision is implemented.",
             "",
         ]
     )
@@ -497,11 +903,17 @@ def main():
     eligible_count = len(eligible_event_ids)
     calibration = {
         "eligible_completed_league_events": eligible_count,
-        "minimum_required_events": MIN_CALIBRATION_EVENTS,
-        "ready_for_candidate_fit": eligible_count >= MIN_CALIBRATION_EVENTS,
+        "minimum_required_events": SHADOW_FIT_MIN_EVENTS,
+        "shadow_fit_minimum_events": SHADOW_FIT_MIN_EVENTS,
+        "loeo_minimum_events": SHADOW_LOEO_MIN_EVENTS,
+        "activation_review_minimum_events": ACTIVATION_REVIEW_MIN_EVENTS,
+        "ready_for_candidate_fit": eligible_count >= SHADOW_FIT_MIN_EVENTS,
+        "ready_for_loeo": eligible_count >= SHADOW_LOEO_MIN_EVENTS,
+        "ready_for_activation_review": eligible_count >= ACTIVATION_REVIEW_MIN_EVENTS,
         "competition": LEAGUE_COMPETITION,
         "live_correction_active": False,
     }
+    shadow = build_shadow_candidates(rows, eligible_count)
 
     report = {
         "version": "calibration-report-v0.1",
@@ -512,12 +924,14 @@ def main():
         "events": event_reports,
         "horizon_summary": build_horizon_summary(rows),
         "signal_relationships": build_signal_relationships(rows, eligible_count),
+        "shadow_live_correction": shadow,
         "source_evaluation_summary": evaluation_summary,
         "interpretation_policy": {
             "inventory": "demand_proxy_not_confirmed_sales",
             "pre_calibration": "show_raw_trajectory_and_historical_error_only",
-            "post_minimum_gate": "show_diagnostic_correlations_only",
-            "production_activation": "requires_event_level_out_of_sample_improvement_over_historical_baseline",
+            "shadow_fit": "fit simple capped candidates from four completed league events without changing production P50",
+            "loeo_validation": "from five events, validate by holding out complete events rather than individual horizon rows",
+            "production_activation": "disabled; activation review requires a higher event gate and event-level out-of-sample improvement",
         },
     }
 
@@ -527,15 +941,17 @@ def main():
     event_csv_path = OUTPUT_DIR / "calibration_event_horizons_v01.csv"
     horizon_csv_path = OUTPUT_DIR / "calibration_horizon_summary_v01.csv"
     signal_csv_path = OUTPUT_DIR / "calibration_signal_relationships_v01.csv"
+    shadow_csv_path = OUTPUT_DIR / "calibration_shadow_loeo_predictions_v01.csv"
 
     json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     markdown_path.write_text(build_markdown(report), encoding="utf-8")
     write_csv(event_csv_path, flatten_event_horizons(event_reports))
     write_csv(horizon_csv_path, report["horizon_summary"])
     write_csv(signal_csv_path, report["signal_relationships"])
+    write_csv(shadow_csv_path, shadow["loeo_predictions"])
 
     print(f"Completed event reports: {len(event_reports)}")
-    print(f"Eligible league calibration events: {eligible_count}/{MIN_CALIBRATION_EVENTS}")
+    print(f"Eligible league calibration events: {eligible_count}/{SHADOW_FIT_MIN_EVENTS}")
     print(f"Candidate fit ready: {calibration['ready_for_candidate_fit']}")
     print(f"Markdown: {markdown_path}")
     print(f"JSON: {json_path}")
