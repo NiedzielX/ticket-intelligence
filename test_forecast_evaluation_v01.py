@@ -65,6 +65,25 @@ def main():
     assert_equal(row["historical_abs_error"], 2000, "Absolute historical error")
     assert_equal(row["horizon_early_gap_hours"], 0.5, "Horizon gap")
 
+    staged_rows = []
+    for event_id in range(1, 7):
+        staged = dict(row)
+        staged["ticket_event_id"] = event_id
+        staged_rows.append(staged)
+
+    status_four = evaluator.calibration_status(staged_rows[:4])
+    assert_equal(status_four["ready_for_candidate_fit"], True, "Four events enable shadow fit")
+    assert_equal(status_four["ready_for_loeo"], False, "Four events do not enable LOEO")
+    assert_equal(status_four["live_correction_active"], False, "Production correction remains off")
+
+    status_five = evaluator.calibration_status(staged_rows[:5])
+    assert_equal(status_five["ready_for_loeo"], True, "Five events enable LOEO")
+    assert_equal(status_five["ready_for_activation_review"], False, "Five events do not open activation review")
+
+    status_six = evaluator.calibration_status(staged_rows)
+    assert_equal(status_six["ready_for_activation_review"], True, "Six events open activation review")
+    assert_equal(status_six["live_correction_active"], False, "Activation review does not enable production")
+
     print("SUCCESS")
 
 
