@@ -727,6 +727,7 @@ def fmt_bool(value):
 
 def build_markdown(report):
     calibration = report["calibration"]
+    shadow = report.get("shadow_live_correction", {})
     lines = [
         "# Beyond Ticketing — Calibration Report v0.1",
         "",
@@ -734,11 +735,15 @@ def build_markdown(report):
         "",
         "## Calibration status",
         "",
-        f"Completed eligible league events: **{calibration['eligible_completed_league_events']} / {calibration['minimum_required_events']}**",
+        f"Completed eligible league events: **{calibration['eligible_completed_league_events']}**",
         "",
-        f"Candidate live-correction fit: **{'READY' if calibration['ready_for_candidate_fit'] else 'NOT READY'}**",
+        f"Shadow fit gate: **{calibration['eligible_completed_league_events']} / {calibration['shadow_fit_minimum_events']} — {'READY' if calibration['ready_for_candidate_fit'] else 'NOT READY'}**",
+        f"LOEO gate: **{calibration['eligible_completed_league_events']} / {calibration['loeo_minimum_events']} — {'READY' if calibration['ready_for_loeo'] else 'NOT READY'}**",
+        f"Activation review gate: **{calibration['eligible_completed_league_events']} / {calibration['activation_review_minimum_events']} — {'READY' if shadow.get('activation_review_ready') else 'NOT READY'}**",
         "",
-        "Live inventory is still a demand proxy, not confirmed ticket sales. No live correction is activated by this report.",
+        "Production live correction: **OFF**",
+        "",
+        "Live inventory is still a demand proxy, not confirmed ticket sales. Shadow candidates never change production P50.",
         "",
     ]
 
@@ -822,12 +827,61 @@ def build_markdown(report):
                 f"| {row['horizon']} | {row['feature_label']} | {row['pair_count']} | {fmt_number(row.get('pearson_correlation_with_historical_residual'), 3)} | {fmt_bool(row.get('correlation_sign_matches_domain_expectation'))} |"
             )
 
+    lines.extend(["", "## Shadow live-correction candidates", ""])
+    if shadow.get("status") == "not_ready":
+        lines.append(
+            f"No candidate is fitted yet. First shadow fit starts at {shadow.get('fit_minimum_events', SHADOW_FIT_MIN_EVENTS)} completed league events."
+        )
+    else:
+        lines.extend(
+            [
+                f"Correction cap: **±{float(shadow.get('max_adjustment_ratio', SHADOW_MAX_ADJUSTMENT_RATIO)) * 100:.0f}% of historical P50**.",
+                "Candidates are event-balanced. In-sample results are exploratory; LOEO is the first out-of-sample gate.",
+                "",
+                "| Candidate | Train events | In-sample MAE | LOEO MAE | LOEO improvement | Events improved/worsened | Guardrails |",
+                "|---|---:|---:|---:|---:|---:|---|",
+            ]
+        )
+        for candidate in shadow.get("candidates", []):
+            in_sample = candidate.get("in_sample", {})
+            loeo = candidate.get("loeo", {})
+            loeo_ready = loeo.get("status") == "ready"
+            guardrails = (
+                fmt_bool(loeo.get("passes_shadow_guardrails"))
+                if loeo_ready
+                else "not ready"
+            )
+            improved_worsened = (
+                f"{loeo.get('improved_event_count', 0)}/{loeo.get('worsened_event_count', 0)}"
+                if loeo_ready
+                else "—"
+            )
+            lines.append(
+                "| {name} | {events} | {in_mae} | {loeo_mae} | {improvement} | {iw} | {guardrails} |".format(
+                    name=candidate["name"],
+                    events=candidate.get("training_event_count", "—"),
+                    in_mae=fmt_number(in_sample.get("shadow_mae")),
+                    loeo_mae=fmt_number(loeo.get("shadow_mae")),
+                    improvement=fmt_number(loeo.get("mae_improvement")),
+                    iw=improved_worsened,
+                    guardrails=guardrails,
+                )
+            )
+        lines.extend(
+            [
+                "",
+                f"Preferred shadow candidate: **{shadow.get('preferred_shadow_candidate') or 'none yet'}**",
+                "",
+            ]
+        )
+
     lines.extend(
         [
             "",
             "## Decision rule",
             "",
-            "Do not activate Live Correction from this report alone. A candidate model is considered only after the minimum event gate is met and must beat the historical-only baseline on event-level out-of-sample validation.",
+            "Four completed league events allow exploratory shadow fitting. Five allow leave-one-event-out validation with complete events held out. Six only opens an activation review; it does not activate anything automatically.",
+            "A shadow candidate must improve event-level LOEO MAE, improve more held-out events than it worsens, and respect its domain-direction guardrail. Production P50 remains historical until a separate activation decision is implemented.",
             "",
         ]
     )
