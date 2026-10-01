@@ -938,7 +938,7 @@ def main():
         "ready_for_loeo": eligible_count >= SHADOW_LOEO_MIN_EVENTS,
         "ready_for_activation_review": eligible_count >= ACTIVATION_REVIEW_MIN_EVENTS,
         "competition": LEAGUE_COMPETITION,
-        "live_correction_active": eligible_count >= SHADOW_FIT_MIN_EVENTS,
+        "live_correction_active": False,
         "controlled_blend_runtime_eligible": eligible_count >= SHADOW_FIT_MIN_EVENTS,
         "full_live_correction_active": False,
     }
