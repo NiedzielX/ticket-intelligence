@@ -34,7 +34,7 @@ jobs:
       - name: Install forecast test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy scikit-learn joblib
+          pip install pandas numpy requests scikit-learn joblib
 
       - name: Test forecast live quality persistence
         run: python test_forecast_live_quality_v01.py
