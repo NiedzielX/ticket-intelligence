@@ -15,7 +15,7 @@ EVENT_PROVIDER = os.getenv("EVENT_PROVIDER", "roboticket")
 MODEL_VERSION = os.getenv("FORECAST_MODEL_VERSION", "beyond-forecast-v0.2")
 OUTPUT_DIR = Path(os.getenv("LIVE_MONITOR_OUTPUT_DIR", "live_forecast_monitor_artifacts_v01"))
 PAGE_SIZE = 1000
-RECENT_TABLE_ROWS = int(os.getenv("LIVE_MONITOR_RECENT_ROWS", "18"))
+RECENT_TABLE_ROWS = int(os.getenv("LIVE_MONITOR_RECENT_ROWS", "18"))\nCONTROLLED_BLEND_WEIGHT = float(os.getenv("LIVE_BLEND_WEIGHT", "0.20"))
 
 
 def api_get_all(path):
@@ -76,12 +76,38 @@ def load_observations(ticket_event_id):
                 "historical_p50,live_adjustment,final_p50,forecast_status,"
                 "correction_status,signal_readiness,live_available_total,"
                 "live_available_index,live_velocity_6h,live_velocity_24h,"
-                "live_acceleration_6h_vs_24h,payload"
+                "live_acceleration_6h_vs_24h"
             ),
             "order": "forecast_generated_at.asc",
         }
     )
     return api_get_all(f"forecast_observations?{params}")
+
+
+def load_latest_payload(ticket_event_id):
+    params = parse.urlencode(
+        {
+            "ticket_event_id": f"eq.{ticket_event_id}",
+            "model_version": f"eq.{MODEL_VERSION}",
+            "select": "id,payload",
+            "order": "forecast_generated_at.desc",
+            "limit": "1",
+        }
+    )
+    rows = api_get_all(f"forecast_observations?{params}")
+    return rows[0] if rows else None
+
+
+def attach_latest_payload(observations, latest_payload_row):
+    if not observations or not latest_payload_row:
+        return observations
+    if int(observations[-1]["id"]) != int(latest_payload_row["id"]):
+        raise RuntimeError(
+            "Latest monitor observation does not match latest payload observation."
+        )
+    observations[-1] = dict(observations[-1])
+    observations[-1]["payload"] = latest_payload_row.get("payload") or {}
+    return observations
 
 
 def number(value, digits=None):
