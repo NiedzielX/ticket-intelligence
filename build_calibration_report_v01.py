@@ -791,22 +791,21 @@ def build_markdown(report):
                 f"Competition: `{event['competition'] or 'unknown'}`  ",
                 f"Outcome source: `{event['outcome_source_name'] or 'unknown'}`",
                 "",
-                "| Horizon | Historical P50 | Error (actual - forecast) | P10-P90 hit | Available index | Net removed | Vel. 6h | Vel. 24h | Accel. | Readiness |",
-                "|---|---:|---:|:---:|---:|---:|---:|---:|---:|---|",
+                "| Horizon | Historical P50 | Candidate P50 | Production P50 | Hist. error | Candidate error | Prod. error | Available index | Readiness |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---|",
             ]
         )
         for row in event["horizons"]:
             lines.append(
-                "| {horizon} | {p50} | {error} | {coverage} | {available_index} | {net_removed} | {velocity_6h} | {velocity_24h} | {acceleration} | {readiness} |".format(
+                "| {horizon} | {historical_p50} | {candidate_p50} | {production_p50} | {historical_error} | {candidate_error} | {production_error} | {available_index} | {readiness} |".format(
                     horizon=row["horizon"],
-                    p50=fmt_number(row.get("historical_p50")),
-                    error=fmt_number(row.get("historical_error")),
-                    coverage=fmt_bool(row.get("historical_interval_hit")),
+                    historical_p50=fmt_number(row.get("historical_p50")),
+                    candidate_p50=fmt_number(row.get("candidate_p50")),
+                    production_p50=fmt_number(row.get("final_p50")),
+                    historical_error=fmt_number(row.get("historical_error")),
+                    candidate_error=fmt_number(row.get("candidate_error")),
+                    production_error=fmt_number(row.get("final_error")),
                     available_index=fmt_number(row.get("live_available_index"), 3),
-                    net_removed=fmt_number(row.get("live_net_removed_since_first")),
-                    velocity_6h=fmt_number(row.get("live_velocity_6h"), 1),
-                    velocity_24h=fmt_number(row.get("live_velocity_24h"), 1),
-                    acceleration=fmt_number(row.get("live_acceleration_6h_vs_24h"), 1),
                     readiness=row.get("signal_readiness") or "—",
                 )
             )
@@ -822,15 +821,15 @@ def build_markdown(report):
         [
             "## Historical baseline by horizon",
             "",
-            "| Horizon | Events | Historical MAE | Bias (actual - forecast) | P10-P90 coverage |",
-            "|---|---:|---:|---:|---:|",
+            "| Horizon | Events | Historical MAE | Candidate MAE | Controlled blend MAE | Bias (actual - forecast) | P10-P90 coverage |",
+            "|---|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for row in report["horizon_summary"]:
         coverage = row.get("historical_p10_p90_coverage")
         coverage_text = "—" if coverage is None else f"{coverage * 100:.1f}%"
         lines.append(
-            f"| {row['horizon']} | {row['event_count']} | {fmt_number(row.get('historical_mae'))} | {fmt_number(row.get('historical_bias_actual_minus_forecast'))} | {coverage_text} |"
+            f"| {row['horizon']} | {row['event_count']} | {fmt_number(row.get('historical_mae'))} | {fmt_number(row.get('candidate_mae'))} | {fmt_number(row.get('controlled_blend_mae'))} | {fmt_number(row.get('historical_bias_actual_minus_forecast'))} | {coverage_text} |"
         )
 
     lines.extend(["", "## Live signal relationships", ""])
