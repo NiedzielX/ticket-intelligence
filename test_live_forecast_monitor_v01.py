@@ -180,6 +180,55 @@ def test_monitor_handles_historical_fallback():
     assert_equal(latest["production_p50"], 38466, "Historical P50 retained")
 
 
+def test_lightweight_historical_rows_reconstruct_candidate():
+    row = observation(
+        1,
+        "2026-10-01T15:00:00+00:00",
+        407.5,
+        38466,
+        34000,
+        37573,
+        -893,
+        0.82,
+    )
+    row.pop("payload")
+    normalized = monitor.normalize_observation(row)
+
+    assert_equal(
+        normalized["candidate_name"],
+        "controlled_live_candidate",
+        "Historical lightweight row keeps generic candidate marker",
+    )
+    assert_equal(
+        normalized["candidate_adjustment"],
+        -4465,
+        "Candidate adjustment reconstructed from 20% production blend",
+    )
+    assert_equal(
+        normalized["candidate_p50"],
+        34001,
+        "Candidate P50 reconstructed within persisted rounding precision",
+    )
+    assert_equal(normalized["guardrails_pass"], True, "Controlled blend implies passed runtime guardrails")
+
+
+def test_latest_payload_is_attached_only_to_latest_row():
+    rows = [
+        {"id": 1, "payload": None},
+        {"id": 2, "payload": None},
+    ]
+    attached = monitor.attach_latest_payload(
+        rows,
+        {"id": 2, "payload": {"correction": {"selected_candidate": "bias_only"}}},
+    )
+    assert_equal(attached[0].get("payload"), None, "Older row remains payload-light")
+    assert_equal(
+        attached[1]["payload"]["correction"]["selected_candidate"],
+        "bias_only",
+        "Latest row receives full payload",
+    )
+
+
 def test_empty_monitor_is_readable():
     event = {
         "id": 5,
@@ -199,6 +248,8 @@ def test_empty_monitor_is_readable():
 def main():
     test_monitor_current_state_and_trajectory()
     test_monitor_handles_historical_fallback()
+    test_lightweight_historical_rows_reconstruct_candidate()
+    test_latest_payload_is_attached_only_to_latest_row()
     test_empty_monitor_is_readable()
     print("SUCCESS")
 
