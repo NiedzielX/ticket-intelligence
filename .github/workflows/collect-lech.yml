@@ -21,6 +21,7 @@ on:
       - test_discover_roboticket_events_v01.py
       - test_live_ticket_features_v01.py
       - test_forecast_live_quality_v01.py
+      - test_beyond_live_correction_v01.py
       - sql/snapshot_event_context_v01.sql
       - .github/workflows/collect-lech.yml
   push:
@@ -80,6 +81,8 @@ jobs:
             discover_roboticket_events_v01.py \
             apply_roboticket_event_overrides_v01.py \
             build_beyond_forecast_v01.py \
+            build_calibration_report_v01.py \
+            evaluate_forecast_horizons_v01.py \
             run_active_event_intelligence_v01.py
 
   pipeline:
@@ -93,8 +96,14 @@ jobs:
       EVENT_HOME_TEAM: "Lech Poznań"
       FORECAST_MIN_INTERVAL_MINUTES: "50"
       MAX_LIVE_SNAPSHOT_AGE_MINUTES: "20"
-      FORECAST_MODEL_VERSION: "beyond-forecast-v0.1"
+      FORECAST_MODEL_VERSION: "beyond-forecast-v0.2"
       FORCE_INTELLIGENCE: "false"
+      LIVE_CANDIDATE_MIN_EVENTS: "3"
+      LIVE_BLEND_WEIGHT: "0.20"
+      LIVE_CANDIDATE_MAX_ADJUSTMENT_RATIO: "0.20"
+      LIVE_PRODUCTION_MAX_ADJUSTMENT_RATIO: "0.10"
+      SHADOW_FIT_MIN_EVENTS: "3"
+      SHADOW_MAX_ADJUSTMENT_RATIO: "0.20"
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
       ROBOTICKET_USERNAME: ${{ secrets.ROBOTICKET_USERNAME }}
@@ -141,6 +150,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pandas numpy requests scikit-learn joblib
+
+      - name: Test forward live correction
+        run: python test_beyond_live_correction_v01.py
 
       - name: Install Chromium
         run: python -m playwright install chromium
