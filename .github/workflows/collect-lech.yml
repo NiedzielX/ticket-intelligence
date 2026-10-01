@@ -16,12 +16,14 @@ on:
       - build_beyond_forecast_v01.py
       - enrich_forecast_live_quality_v01.py
       - persist_forecast_observation_v01.py
+      - build_live_forecast_monitor_v01.py
       - run_active_event_intelligence_v01.py
       - test_run_active_event_intelligence_v01.py
       - test_discover_roboticket_events_v01.py
       - test_live_ticket_features_v01.py
       - test_forecast_live_quality_v01.py
       - test_beyond_live_correction_v01.py
+      - test_live_forecast_monitor_v01.py
       - sql/snapshot_event_context_v01.sql
       - .github/workflows/collect-lech.yml
   push:
@@ -75,6 +77,7 @@ jobs:
           python test_discover_roboticket_events_v01.py
           python test_live_ticket_features_v01.py
           python test_forecast_live_quality_v01.py
+          python test_live_forecast_monitor_v01.py
           python -m py_compile \
             collector.py \
             collect_discovered_events_v01.py \
@@ -83,6 +86,7 @@ jobs:
             build_beyond_forecast_v01.py \
             build_calibration_report_v01.py \
             evaluate_forecast_horizons_v01.py \
+            build_live_forecast_monitor_v01.py \
             run_active_event_intelligence_v01.py
 
   pipeline:
@@ -284,4 +288,5 @@ jobs:
             active_ticket_event_matrix.json
             live_ticket_artifacts_v01/
             beyond_forecast_artifacts_v01/
+            live_forecast_monitor_artifacts_v01/
           retention-days: 3
