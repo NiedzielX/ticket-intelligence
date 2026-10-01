@@ -1,0 +1,131 @@
+name: Live Forecast Monitor v0.1
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - build_live_forecast_monitor_v01.py
+      - test_live_forecast_monitor_v01.py
+      - build_active_ticket_event_matrix_v01.py
+      - .github/workflows/live-forecast-monitor-v01.yml
+  push:
+    branches:
+      - main
+    paths:
+      - build_live_forecast_monitor_v01.py
+      - test_live_forecast_monitor_v01.py
+      - build_active_ticket_event_matrix_v01.py
+      - .github/workflows/live-forecast-monitor-v01.yml
+  schedule:
+    - cron: "37 * * * *"
+
+concurrency:
+  group: live-forecast-monitor-v01
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile monitor
+        run: python -m py_compile build_live_forecast_monitor_v01.py
+
+      - name: Test monitor
+        run: python test_live_forecast_monitor_v01.py
+
+  monitor:
+    needs: self-test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      EVENT_PROVIDER: "roboticket"
+      EVENT_HOME_TEAM: "Lech Poznań"
+      FORECAST_MODEL_VERSION: "beyond-forecast-v0.2"
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build active event matrix
+        run: python build_active_ticket_event_matrix_v01.py
+
+      - name: Build monitors
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          events = json.load(open("active_ticket_event_matrix.json", encoding="utf-8"))
+          if not events:
+              print("No active events. Nothing to monitor.")
+              raise SystemExit(0)
+
+          failures = []
+          for event in events:
+              env = os.environ.copy()
+              env["EVENT_ID"] = str(event["id"])
+              env["EVENT_KICKOFF_AT"] = str(event.get("kickoff_at") or "")
+              print(
+                  f"Building monitor for {event.get('home_team')} vs "
+                  f"{event.get('away_team')} ({event['id']})"
+              )
+              completed = subprocess.run(
+                  [sys.executable, "build_live_forecast_monitor_v01.py"],
+                  env=env,
+                  check=False,
+              )
+              if completed.returncode != 0:
+                  failures.append(str(event["id"]))
+
+          if failures:
+              raise RuntimeError(
+                  "Live monitor failed for event(s): " + ", ".join(failures)
+              )
+          PY
+
+      - name: Publish monitor in Actions summary
+        if: always()
+        run: |
+          if compgen -G "live_forecast_monitor_artifacts_v01/*.md" > /dev/null; then
+            for FILE in live_forecast_monitor_artifacts_v01/*.md; do
+              cat "$FILE" >> "$GITHUB_STEP_SUMMARY"
+              printf "\n\n---\n\n" >> "$GITHUB_STEP_SUMMARY"
+            done
+          else
+            echo "No live forecast monitor artifact was generated." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload live forecast monitor
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-forecast-monitor-v0-1
+          path: |
+            active_ticket_event_matrix.json
+            live_forecast_monitor_artifacts_v01/
+          if-no-files-found: ignore
+          retention-days: 7
