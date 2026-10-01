@@ -18,7 +18,7 @@ HORIZONS = tuple(
     if value.strip()
 )
 MAX_EARLY_GAP_HOURS = float(os.getenv("HORIZON_MAX_EARLY_GAP_HOURS", "2.5"))
-SHADOW_FIT_MIN_EVENTS = int(os.getenv("SHADOW_FIT_MIN_EVENTS", "4"))
+SHADOW_FIT_MIN_EVENTS = int(os.getenv("SHADOW_FIT_MIN_EVENTS", "3"))
 SHADOW_LOEO_MIN_EVENTS = int(os.getenv("SHADOW_LOEO_MIN_EVENTS", "5"))
 ACTIVATION_REVIEW_MIN_EVENTS = int(os.getenv("ACTIVATION_REVIEW_MIN_EVENTS", "6"))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "forecast_evaluation_artifacts_v01"))
@@ -110,7 +110,7 @@ def load_observations(ticket_event_ids):
                 "id,ticket_event_id,source_snapshot_id,forecast_generated_at,"
                 "source_snapshot_captured_at,hours_to_kickoff,horizon,model_version,"
                 "historical_model,historical_p10,historical_p50,historical_p90,"
-                "final_p10,final_p50,final_p90,forecast_status,correction_status,"
+                "live_adjustment,final_p10,final_p50,final_p90,forecast_status,correction_status,payload,"
                 "signal_readiness,live_available_total,live_first_available_total,"
                 "live_available_index,live_net_removed_since_first,"
                 "live_net_removed_since_previous,live_velocity_since_previous,"
@@ -144,14 +144,22 @@ def make_evaluation_row(event, outcome, observation, target_hours):
     actual = int(outcome["actual_attendance"])
     historical_p50 = observation.get("historical_p50")
     final_p50 = observation.get("final_p50")
+    payload = observation.get("payload") or {}
+    correction = payload.get("correction") or {}
+    candidate_p50 = correction.get("candidate_p50")
     historical_error = None
     historical_abs_error = None
+    candidate_error = None
+    candidate_abs_error = None
     final_error = None
     final_abs_error = None
 
     if historical_p50 is not None:
         historical_error = actual - int(historical_p50)
         historical_abs_error = abs(historical_error)
+    if candidate_p50 is not None:
+        candidate_error = actual - int(round(float(candidate_p50)))
+        candidate_abs_error = abs(candidate_error)
     if final_p50 is not None:
         final_error = actual - int(final_p50)
         final_abs_error = abs(final_error)
@@ -180,6 +188,14 @@ def make_evaluation_row(event, outcome, observation, target_hours):
         "historical_p90": observation.get("historical_p90"),
         "historical_error": historical_error,
         "historical_abs_error": historical_abs_error,
+        "candidate_name": correction.get("selected_candidate"),
+        "candidate_training_event_count": correction.get("training_event_count"),
+        "candidate_p50": candidate_p50,
+        "candidate_adjustment": correction.get("candidate_adjustment"),
+        "candidate_error": candidate_error,
+        "candidate_abs_error": candidate_abs_error,
+        "production_blend_weight": correction.get("blend_weight"),
+        "live_adjustment": observation.get("live_adjustment"),
         "final_p10": observation.get("final_p10"),
         "final_p50": final_p50,
         "final_p90": observation.get("final_p90"),
@@ -260,9 +276,9 @@ def calibration_status(evaluation_rows):
         "ready_for_activation_review": count >= ACTIVATION_REVIEW_MIN_EVENTS,
         "live_correction_active": False,
         "rule": (
-            "Fit simple shadow candidates from four distinct completed league events. "
-            "Start leave-one-event-out validation from five events. Six events only opens "
-            "an activation review; production correction remains disabled."
+            "Fit guarded live candidates from three distinct completed league events. "
+            "Start leave-one-event-out validation from five events. Six events opens "
+            "a broader activation review; controlled production blending is evaluated separately."
         ),
     }
 
