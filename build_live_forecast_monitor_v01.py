@@ -133,10 +133,33 @@ def normalize_observation(row):
     live = payload.get("live") or {}
     selected = selected_candidate_details(correction)
     selected_name = correction.get("selected_candidate")
+    correction_status = row.get("correction_status")
+    historical_p50 = number(row.get("historical_p50"))
+    production_adjustment = number(row.get("live_adjustment")) or 0
+
+    candidate_adjustment = number(correction.get("candidate_adjustment"))
+    candidate_p50 = number(correction.get("candidate_p50"))
+    blend_weight = number(correction.get("blend_weight"), 4)
+
+    if (
+        candidate_p50 is None
+        and correction_status == "controlled_live_blend_v01"
+        and historical_p50 is not None
+        and CONTROLLED_BLEND_WEIGHT > 0
+    ):
+        candidate_adjustment = int(
+            round(float(production_adjustment) / CONTROLLED_BLEND_WEIGHT)
+        )
+        candidate_p50 = historical_p50 + candidate_adjustment
+        blend_weight = CONTROLLED_BLEND_WEIGHT
+        selected_name = selected_name or "controlled_live_candidate"
+
     guardrails = None
-    if selected_name:
+    if correction_status == "controlled_live_blend_v01":
+        guardrails = True
+    elif selected_name:
         guardrails = bool((selected or {}).get("runtime_guardrails_pass"))
-    elif correction.get("status") in {
+    elif correction_status in {
         "candidate_guardrails_not_met",
         "insufficient_completed_events",
     }:
@@ -149,13 +172,13 @@ def normalize_observation(row):
         "source_snapshot_captured_at": row.get("source_snapshot_captured_at"),
         "hours_to_kickoff": number(row.get("hours_to_kickoff"), 4),
         "horizon": row.get("horizon"),
-        "historical_p50": number(row.get("historical_p50")),
+        "historical_p50": historical_p50,
         "candidate_name": selected_name,
-        "candidate_p50": number(correction.get("candidate_p50")),
-        "candidate_adjustment": number(correction.get("candidate_adjustment")),
+        "candidate_p50": candidate_p50,
+        "candidate_adjustment": candidate_adjustment,
         "production_p50": number(row.get("final_p50")),
-        "production_adjustment": number(row.get("live_adjustment")) or 0,
-        "blend_weight": number(correction.get("blend_weight"), 4),
+        "production_adjustment": production_adjustment,
+        "blend_weight": blend_weight,
         "training_event_count": correction.get("training_event_count"),
         "training_event_ids": correction.get("training_event_ids") or [],
         "guardrails_pass": guardrails,
@@ -432,6 +455,10 @@ def write_monitor(monitor):
 def main():
     event = resolve_event()
     observations = load_observations(int(event["id"]))
+    observations = attach_latest_payload(
+        observations,
+        load_latest_payload(int(event["id"])),
+    )
     monitor = build_monitor(event, observations)
     json_path, markdown_path, csv_path = write_monitor(monitor)
 
