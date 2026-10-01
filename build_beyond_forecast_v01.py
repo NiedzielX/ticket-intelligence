@@ -11,9 +11,11 @@ import pandas as pd
 import build_lech_demand_dataset_v11 as data_v11
 import build_lech_demand_enrichment_v12_fix2 as enrich_v12
 import build_live_ticket_features_v01 as live_v01
+import build_calibration_report_v01 as calibration_v01
+import evaluate_forecast_horizons_v01 as evaluation_v01
 import run_lech_demand_study_v13 as model_v13
 
-VERSION = "beyond-forecast-v0.1"
+VERSION = "beyond-forecast-v0.2"
 EVENT_ID = int(os.environ["EVENT_ID"])
 EVENT_PROVIDER = os.getenv("EVENT_PROVIDER", "roboticket")
 TOTAL_MATCHES = int(os.getenv("TOTAL_LEAGUE_MATCHES_PER_TEAM", "34"))
@@ -21,6 +23,14 @@ STADIUM_CAPACITY = int(os.getenv("STADIUM_CAPACITY", "43269"))
 VALIDATE = os.getenv("VALIDATE_BASELINE", "false").lower() == "true"
 EXPECTED_MAE = float(os.getenv("EXPECTED_HOLDOUT_MAE", "5321.8"))
 MAE_TOLERANCE = float(os.getenv("HOLDOUT_MAE_TOLERANCE", "1.0"))
+LIVE_CANDIDATE_MIN_EVENTS = int(os.getenv("LIVE_CANDIDATE_MIN_EVENTS", "3"))
+LIVE_BLEND_WEIGHT = float(os.getenv("LIVE_BLEND_WEIGHT", "0.20"))
+LIVE_CANDIDATE_MAX_ADJUSTMENT_RATIO = float(
+    os.getenv("LIVE_CANDIDATE_MAX_ADJUSTMENT_RATIO", "0.20")
+)
+LIVE_PRODUCTION_MAX_ADJUSTMENT_RATIO = float(
+    os.getenv("LIVE_PRODUCTION_MAX_ADJUSTMENT_RATIO", "0.10")
+)
 BASE = Path("lech_demand_artifacts_v1/lech_demand_dataset_v1.csv")
 SOURCE = Path("lech_demand_artifacts_v1/POL_source.csv")
 OUT = Path(os.getenv("OUTPUT_DIR", "beyond_forecast_artifacts_v01"))
@@ -341,6 +351,239 @@ def horizon(hours):
     return f"T-{nearest}h" if abs(hours - nearest) <= 1 else "continuous"
 
 
+def prior_live_correction_rows(event):
+    outcomes = evaluation_v01.load_outcomes(None)
+    if not outcomes:
+        return [], []
+
+    outcome_event_ids = [int(row["ticket_event_id"]) for row in outcomes]
+    events = evaluation_v01.load_events(outcome_event_ids)
+    target_kickoff = pd.Timestamp(event["kickoff_at"]).tz_convert("UTC")
+
+    prior_event_ids = []
+    for event_id, candidate in events.items():
+        kickoff = candidate.get("kickoff_at")
+        if candidate.get("competition") != "Ekstraklasa" or not kickoff:
+            continue
+        candidate_kickoff = pd.Timestamp(kickoff).tz_convert("UTC")
+        if event_id != int(event["id"]) and candidate_kickoff < target_kickoff:
+            prior_event_ids.append(event_id)
+
+    if not prior_event_ids:
+        return [], []
+
+    prior_set = set(prior_event_ids)
+    prior_events = {
+        event_id: row
+        for event_id, row in events.items()
+        if event_id in prior_set
+    }
+    prior_outcomes = [
+        row
+        for row in outcomes
+        if int(row["ticket_event_id"]) in prior_set
+    ]
+    observations = evaluation_v01.load_observations(prior_event_ids)
+    evaluation_rows, _ = evaluation_v01.build_evaluations(
+        prior_events,
+        prior_outcomes,
+        observations,
+    )
+    eligible_rows = [
+        row
+        for row in evaluation_rows
+        if row.get("competition") == "Ekstraklasa"
+        and row.get("historical_p50") is not None
+        and row.get("historical_residual_target") is not None
+    ]
+    eligible_event_ids = sorted(
+        {int(row["ticket_event_id"]) for row in eligible_rows}
+    )
+    return eligible_rows, eligible_event_ids
+
+
+def project_live_candidate(model, historical_p50, live):
+    feature = model.get("feature")
+    feature_value = None
+    if feature == "live_available_index":
+        if live.get("signal_readiness") == "data_gap":
+            return None
+        feature_value = live.get("available_index")
+        if feature_value is None:
+            return None
+
+    raw_correction = float(model["intercept"])
+    if feature is not None:
+        raw_correction += float(model["slope"]) * float(feature_value)
+
+    candidate_cap = abs(float(historical_p50)) * LIVE_CANDIDATE_MAX_ADJUSTMENT_RATIO
+    candidate_adjustment = max(
+        -candidate_cap,
+        min(candidate_cap, raw_correction),
+    )
+    candidate_p50 = float(
+        np.clip(float(historical_p50) + candidate_adjustment, 0, STADIUM_CAPACITY)
+    )
+    return {
+        "raw_adjustment": round(raw_correction, 2),
+        "candidate_adjustment": round(candidate_adjustment, 2),
+        "candidate_p50": round(candidate_p50),
+        "feature_value": (
+            None if feature_value is None else round(float(feature_value), 6)
+        ),
+    }
+
+
+def candidate_passes_runtime_guardrails(model, score, projection):
+    if projection is None:
+        return False
+    if model.get("name") == "available_index_linear" and not model.get("domain_direction_ok"):
+        return False
+    improvement = score.get("mae_improvement")
+    if improvement is None or improvement <= 0:
+        return False
+    return score.get("improved_event_count", 0) > score.get("worsened_event_count", 0)
+
+
+def build_controlled_live_correction(event, historical, live):
+    historical_p50 = historical.get("p50")
+    if (
+        event.get("competition") != "Ekstraklasa"
+        or historical.get("status") != "available"
+        or historical_p50 is None
+    ):
+        return {
+            "status": "not_applicable_without_league_historical_baseline",
+            "selected_candidate": None,
+            "training_event_count": 0,
+            "training_event_ids": [],
+            "candidate_p50": historical_p50,
+            "candidate_adjustment": 0,
+            "blend_weight": 0,
+            "live_adjustment_applied": 0,
+            "production_p10": historical.get("p10"),
+            "production_p50": historical_p50,
+            "production_p90": historical.get("p90"),
+            "candidates": [],
+        }
+
+    rows, training_event_ids = prior_live_correction_rows(event)
+    if len(training_event_ids) < LIVE_CANDIDATE_MIN_EVENTS:
+        return {
+            "status": "insufficient_completed_events",
+            "selected_candidate": None,
+            "training_event_count": len(training_event_ids),
+            "training_event_ids": training_event_ids,
+            "minimum_training_events": LIVE_CANDIDATE_MIN_EVENTS,
+            "candidate_p50": historical_p50,
+            "candidate_adjustment": 0,
+            "blend_weight": 0,
+            "live_adjustment_applied": 0,
+            "production_p10": historical.get("p10"),
+            "production_p50": historical_p50,
+            "production_p90": historical.get("p90"),
+            "candidates": [],
+        }
+
+    candidates = []
+    by_name = {}
+    for candidate_name in ("bias_only", "available_index_linear"):
+        model = calibration_v01.fit_shadow_candidate(
+            rows,
+            candidate_name,
+            minimum_events=LIVE_CANDIDATE_MIN_EVENTS,
+        )
+        if model is None:
+            continue
+        score = calibration_v01.score_shadow_candidate(model, rows)
+        projection = project_live_candidate(model, historical_p50, live)
+        passes = candidate_passes_runtime_guardrails(model, score, projection)
+        candidate = {
+            "name": candidate_name,
+            "feature": model.get("feature"),
+            "training_event_count": model.get("training_event_count"),
+            "training_row_count": model.get("training_row_count"),
+            "intercept": round(float(model["intercept"]), 4),
+            "slope": (
+                None if model.get("slope") is None
+                else round(float(model["slope"]), 4)
+            ),
+            "domain_direction_ok": model.get("domain_direction_ok"),
+            "training_historical_mae": calibration_v01.round_or_none(
+                score.get("historical_mae"), 2
+            ),
+            "training_candidate_mae": calibration_v01.round_or_none(
+                score.get("shadow_mae"), 2
+            ),
+            "training_mae_improvement": calibration_v01.round_or_none(
+                score.get("mae_improvement"), 2
+            ),
+            "training_improved_event_count": score.get("improved_event_count"),
+            "training_worsened_event_count": score.get("worsened_event_count"),
+            "runtime_guardrails_pass": passes,
+            "projection": projection,
+        }
+        candidates.append(candidate)
+        by_name[candidate_name] = candidate
+
+    selected = None
+    available = by_name.get("available_index_linear")
+    bias = by_name.get("bias_only")
+    if available and available["runtime_guardrails_pass"]:
+        selected = available
+    elif bias and bias["runtime_guardrails_pass"]:
+        selected = bias
+
+    if selected is None:
+        return {
+            "status": "candidate_guardrails_not_met",
+            "selected_candidate": None,
+            "training_event_count": len(training_event_ids),
+            "training_event_ids": training_event_ids,
+            "minimum_training_events": LIVE_CANDIDATE_MIN_EVENTS,
+            "candidate_p50": historical_p50,
+            "candidate_adjustment": 0,
+            "blend_weight": 0,
+            "live_adjustment_applied": 0,
+            "production_p10": historical.get("p10"),
+            "production_p50": historical_p50,
+            "production_p90": historical.get("p90"),
+            "candidates": candidates,
+        }
+
+    projection = selected["projection"]
+    candidate_adjustment = float(projection["candidate_adjustment"])
+    requested_adjustment = candidate_adjustment * LIVE_BLEND_WEIGHT
+    production_cap = abs(float(historical_p50)) * LIVE_PRODUCTION_MAX_ADJUSTMENT_RATIO
+    live_adjustment = max(
+        -production_cap,
+        min(production_cap, requested_adjustment),
+    )
+
+    def shifted(value):
+        if value is None:
+            return None
+        return round(float(np.clip(float(value) + live_adjustment, 0, STADIUM_CAPACITY)))
+
+    return {
+        "status": "controlled_live_blend_v01",
+        "selected_candidate": selected["name"],
+        "training_event_count": len(training_event_ids),
+        "training_event_ids": training_event_ids,
+        "minimum_training_events": LIVE_CANDIDATE_MIN_EVENTS,
+        "candidate_p50": projection["candidate_p50"],
+        "candidate_adjustment": projection["candidate_adjustment"],
+        "blend_weight": LIVE_BLEND_WEIGHT,
+        "production_adjustment_cap_ratio": LIVE_PRODUCTION_MAX_ADJUSTMENT_RATIO,
+        "candidate_adjustment_cap_ratio": LIVE_CANDIDATE_MAX_ADJUSTMENT_RATIO,
+        "live_adjustment_applied": round(live_adjustment),
+        "production_p10": shifted(historical.get("p10")),
+        "production_p50": shifted(historical_p50),
+        "production_p90": shifted(historical.get("p90")),
+        "candidates": candidates,
+    }
+
+
 def main():
     event = live_v01.resolve_ticket_event()
     live = live_signal(event)
@@ -351,12 +594,10 @@ def main():
             "status": "unavailable_for_competition",
             "reason": "Validated historical baseline is league-only; European baseline is not yet validated.",
         }
-    p50 = historical.get("p50") if historical.get("status") == "available" else None
-    correction_status = (
-        "pending_empirical_calibration"
-        if p50 is not None
-        else "not_applicable_without_historical_baseline"
-    )
+    correction = build_controlled_live_correction(event, historical, live)
+    production_p50 = correction.get("production_p50")
+    live_adjustment = correction.get("live_adjustment_applied", 0)
+
     payload = {
         "script_version": VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -365,31 +606,38 @@ def main():
         "historical": historical,
         "live": live,
         "correction": {
-            "status": correction_status,
-            "live_adjustment_applied": 0,
-            "production_p50": p50,
+            **correction,
             "rule": (
-                "Live inventory is recorded for calibration but does not shift P50 "
-                "until a correction function is validated on multiple completed events."
+                "From three prior completed league events, fit simple event-balanced candidates "
+                "using only strict as-of historical horizons. Apply at most a 20% blend of the "
+                "selected candidate correction, subject to runtime guardrails and a production cap. "
+                "The active target event is never used for its own correction training."
             ),
         },
         "forecast": {
-            "p10": historical.get("p10"),
-            "p50": p50,
-            "p90": historical.get("p90"),
-            "live_adjustment": 0,
+            "p10": correction.get("production_p10"),
+            "p50": production_p50,
+            "p90": correction.get("production_p90"),
+            "live_adjustment": live_adjustment,
             "status": (
-                "historical_baseline_with_live_observation"
-                if p50 is not None
-                else "live_observation_only"
+                "historical_baseline_with_controlled_live_blend"
+                if correction.get("status") == "controlled_live_blend_v01"
+                else (
+                    "historical_baseline_with_live_observation"
+                    if historical.get("status") == "available"
+                    else "live_observation_only"
+                )
             ),
         },
         "no_leakage": {
             "future_match_results_used": False,
             "inventory_after_forecast_timestamp_used": False,
+            "target_event_used_for_live_correction_training": False,
+            "live_correction_training_event_ids": correction.get("training_event_ids", []),
             "note": (
-                "Sporting context and attendance history use only information available at run time; "
-                "future kickoff is used only for known calendar features."
+                "Historical baseline uses only information available at run time. Live correction "
+                "training uses only completed league events with kickoff before the target event and "
+                "strict pre-horizon observations; the active target event is excluded."
             ),
         },
     }
@@ -398,7 +646,12 @@ def main():
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Event: {event['home_team']} vs {event['away_team']}")
     print(f"Hours to kickoff: {live.get('hours_to_kickoff')} | live readiness: {live.get('signal_readiness')}")
-    print(f"Historical: {historical.get('status')} | P50: {p50} | adjustment: 0")
+    print(
+        f"Historical: {historical.get('status')} | P50: {historical.get('p50')} | "
+        f"candidate: {correction.get('selected_candidate')} | "
+        f"candidate P50: {correction.get('candidate_p50')} | "
+        f"production P50: {production_p50} | adjustment: {live_adjustment}"
+    )
     print(f"Output: {path}\nSUCCESS")
 
 
