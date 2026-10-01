@@ -13,7 +13,7 @@ INPUT_DIR = Path(os.getenv("EVALUATION_INPUT_DIR", "forecast_evaluation_artifact
 OUTPUT_DIR = Path(os.getenv("CALIBRATION_OUTPUT_DIR", "calibration_report_artifacts_v01"))
 EVALUATION_CSV = INPUT_DIR / "forecast_horizon_evaluation_v01.csv"
 EVALUATION_SUMMARY_JSON = INPUT_DIR / "forecast_evaluation_summary_v01.json"
-SHADOW_FIT_MIN_EVENTS = int(os.getenv("SHADOW_FIT_MIN_EVENTS", "4"))
+SHADOW_FIT_MIN_EVENTS = int(os.getenv("SHADOW_FIT_MIN_EVENTS", "3"))
 SHADOW_LOEO_MIN_EVENTS = int(os.getenv("SHADOW_LOEO_MIN_EVENTS", "5"))
 ACTIVATION_REVIEW_MIN_EVENTS = int(os.getenv("ACTIVATION_REVIEW_MIN_EVENTS", "6"))
 SHADOW_MAX_ADJUSTMENT_RATIO = float(os.getenv("SHADOW_MAX_ADJUSTMENT_RATIO", "0.20"))
@@ -66,6 +66,11 @@ INT_FIELDS = {
     "historical_p90",
     "historical_error",
     "historical_abs_error",
+    "candidate_training_event_count",
+    "candidate_p50",
+    "candidate_error",
+    "candidate_abs_error",
+    "live_adjustment",
     "final_p10",
     "final_p50",
     "final_p90",
@@ -88,6 +93,8 @@ FLOAT_FIELDS = {
     "live_velocity_6h",
     "live_velocity_24h",
     "live_acceleration_6h_vs_24h",
+    "candidate_adjustment",
+    "production_blend_weight",
 }
 
 
@@ -547,6 +554,14 @@ def build_event_reports(rows):
                     "historical_error": row.get("historical_error"),
                     "historical_abs_error": row.get("historical_abs_error"),
                     "historical_interval_hit": interval_coverage(row, "historical"),
+                    "candidate_name": row.get("candidate_name"),
+                    "candidate_training_event_count": row.get("candidate_training_event_count"),
+                    "candidate_p50": row.get("candidate_p50"),
+                    "candidate_adjustment": row.get("candidate_adjustment"),
+                    "candidate_error": row.get("candidate_error"),
+                    "candidate_abs_error": row.get("candidate_abs_error"),
+                    "production_blend_weight": row.get("production_blend_weight"),
+                    "live_adjustment": row.get("live_adjustment"),
                     "final_p50": row.get("final_p50"),
                     "final_error": row.get("final_error"),
                     "final_abs_error": row.get("final_abs_error"),
@@ -594,6 +609,16 @@ def build_horizon_summary(rows):
         horizon_rows = grouped[target_hours]
         abs_errors = [row.get("historical_abs_error") for row in horizon_rows]
         signed_errors = [row.get("historical_error") for row in horizon_rows]
+        candidate_abs_errors = [
+            row.get("candidate_abs_error")
+            for row in horizon_rows
+            if row.get("candidate_abs_error") is not None
+        ]
+        final_abs_errors = [
+            row.get("final_abs_error")
+            for row in horizon_rows
+            if row.get("final_abs_error") is not None
+        ]
         coverage_values = [
             interval_coverage(row, "historical")
             for row in horizon_rows
@@ -606,6 +631,8 @@ def build_horizon_summary(rows):
                 "event_count": len({int(row["ticket_event_id"]) for row in horizon_rows}),
                 "historical_mae": round_or_none(mean(abs_errors), 1),
                 "historical_bias_actual_minus_forecast": round_or_none(mean(signed_errors), 1),
+                "candidate_mae": round_or_none(mean(candidate_abs_errors), 1),
+                "controlled_blend_mae": round_or_none(mean(final_abs_errors), 1),
                 "historical_p10_p90_coverage": (
                     round(sum(bool(value) for value in coverage_values) / len(coverage_values), 4)
                     if coverage_values
@@ -737,13 +764,13 @@ def build_markdown(report):
         "",
         f"Completed eligible league events: **{calibration['eligible_completed_league_events']}**",
         "",
-        f"Shadow fit gate: **{calibration['eligible_completed_league_events']} / {calibration['shadow_fit_minimum_events']} — {'READY' if calibration['ready_for_candidate_fit'] else 'NOT READY'}**",
+        f"Live candidate fit gate: **{calibration['eligible_completed_league_events']} / {calibration['shadow_fit_minimum_events']} — {'READY' if calibration['ready_for_candidate_fit'] else 'NOT READY'}**",
         f"LOEO gate: **{calibration['eligible_completed_league_events']} / {calibration['loeo_minimum_events']} — {'READY' if calibration['ready_for_loeo'] else 'NOT READY'}**",
         f"Activation review gate: **{calibration['eligible_completed_league_events']} / {calibration['activation_review_minimum_events']} — {'READY' if shadow.get('activation_review_ready') else 'NOT READY'}**",
         "",
-        "Production live correction: **OFF**",
+        "Production mode: **CONTROLLED LIVE BLEND** when runtime guardrails pass; otherwise historical P50 is kept.",
         "",
-        "Live inventory is still a demand proxy, not confirmed ticket sales. Shadow candidates never change production P50.",
+        "The candidate may move by up to ±20% of historical P50, but production uses only a 20% blend of that candidate correction. Full candidate activation remains disabled.",
         "",
     ]
 
@@ -830,7 +857,7 @@ def build_markdown(report):
     lines.extend(["", "## Shadow live-correction candidates", ""])
     if shadow.get("status") == "not_ready":
         lines.append(
-            f"No candidate is fitted yet. First shadow fit starts at {shadow.get('fit_minimum_events', SHADOW_FIT_MIN_EVENTS)} completed league events."
+            f"No candidate is fitted yet. First live candidate fit starts at {shadow.get('fit_minimum_events', SHADOW_FIT_MIN_EVENTS)} completed league events."
         )
     else:
         lines.extend(
@@ -880,8 +907,8 @@ def build_markdown(report):
             "",
             "## Decision rule",
             "",
-            "Four completed league events allow exploratory shadow fitting. Five allow leave-one-event-out validation with complete events held out. Six only opens an activation review; it does not activate anything automatically.",
-            "A shadow candidate must improve event-level LOEO MAE, improve more held-out events than it worsens, and respect its domain-direction guardrail. Production P50 remains historical until a separate activation decision is implemented.",
+            "Three completed league events allow a guarded forward live candidate and controlled 20% production blend. Five allow leave-one-event-out validation with complete events held out. Six opens a broader activation review.",
+            "At runtime, a candidate is blended only when event-balanced training MAE improves, more prior events improve than worsen, and the available-index direction is sensible. Full candidate activation remains disabled.",
             "",
         ]
     )
@@ -911,7 +938,9 @@ def main():
         "ready_for_loeo": eligible_count >= SHADOW_LOEO_MIN_EVENTS,
         "ready_for_activation_review": eligible_count >= ACTIVATION_REVIEW_MIN_EVENTS,
         "competition": LEAGUE_COMPETITION,
-        "live_correction_active": False,
+        "live_correction_active": eligible_count >= SHADOW_FIT_MIN_EVENTS,
+        "controlled_blend_runtime_eligible": eligible_count >= SHADOW_FIT_MIN_EVENTS,
+        "full_live_correction_active": False,
     }
     shadow = build_shadow_candidates(rows, eligible_count)
 
@@ -929,9 +958,9 @@ def main():
         "interpretation_policy": {
             "inventory": "demand_proxy_not_confirmed_sales",
             "pre_calibration": "show_raw_trajectory_and_historical_error_only",
-            "shadow_fit": "fit simple capped candidates from four completed league events without changing production P50",
+            "forward_live_fit": "from three completed league events, fit simple event-balanced candidates and allow only a guarded 20% production blend",
             "loeo_validation": "from five events, validate by holding out complete events rather than individual horizon rows",
-            "production_activation": "disabled; activation review requires a higher event gate and event-level out-of-sample improvement",
+            "full_production_activation": "disabled; activation review requires a higher event gate and event-level out-of-sample improvement",
         },
     }
 
