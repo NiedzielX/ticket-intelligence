@@ -8,7 +8,10 @@ on:
     paths:
       - enrich_forecast_live_quality_v01.py
       - test_forecast_live_quality_v01.py
+      - test_beyond_live_correction_v01.py
       - build_beyond_forecast_v01.py
+      - build_calibration_report_v01.py
+      - evaluate_forecast_horizons_v01.py
       - persist_forecast_observation_v01.py
       - .github/workflows/beyond-forecast-v01.yml
 
@@ -28,8 +31,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install forecast test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy scikit-learn joblib
+
       - name: Test forecast live quality persistence
         run: python test_forecast_live_quality_v01.py
+
+      - name: Test forward live correction
+        run: python test_beyond_live_correction_v01.py
 
   active-events:
     needs: self-test
@@ -85,6 +96,12 @@ jobs:
       PERSIST_FORECAST: "true"
       EXPECTED_HOLDOUT_MAE: "5321.8"
       HOLDOUT_MAE_TOLERANCE: "50.0"
+      LIVE_CANDIDATE_MIN_EVENTS: "3"
+      LIVE_BLEND_WEIGHT: "0.20"
+      LIVE_CANDIDATE_MAX_ADJUSTMENT_RATIO: "0.20"
+      LIVE_PRODUCTION_MAX_ADJUSTMENT_RATIO: "0.10"
+      SHADOW_FIT_MIN_EVENTS: "3"
+      SHADOW_MAX_ADJUSTMENT_RATIO: "0.20"
       TRANSIENT_JUMP_THRESHOLD: "500"
       TRANSIENT_RETURN_TOLERANCE: "100"
       SNAPSHOT_GAP_THRESHOLD_HOURS: "2.5"
@@ -123,6 +140,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: beyond-forecast-v0-1-${{ matrix.event.id }}
+          name: beyond-forecast-v0-2-${{ matrix.event.id }}
           path: beyond_forecast_artifacts_v01/
           retention-days: 7
