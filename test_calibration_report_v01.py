@@ -101,11 +101,11 @@ def test_basic_reports():
     )
 
 
-def test_shadow_fit_starts_at_four_events():
-    rows = make_linear_shadow_rows(4)
-    shadow = report.build_shadow_candidates(rows, eligible_event_count=4)
+def test_live_candidate_fit_starts_at_three_events():
+    rows = make_linear_shadow_rows(3)
+    shadow = report.build_shadow_candidates(rows, eligible_event_count=3)
 
-    assert_equal(shadow["status"], "fit_ready", "Four events enable exploratory shadow fit")
+    assert_equal(shadow["status"], "fit_ready", "Three events enable exploratory live candidate fit")
     assert_equal(shadow["production_live_correction_active"], False, "Production remains off")
     assert_equal(shadow["preferred_shadow_candidate"], None, "No preferred candidate before LOEO")
 
@@ -114,11 +114,11 @@ def test_shadow_fit_starts_at_four_events():
         if candidate["name"] == "available_index_linear"
     )
     assert_equal(available["domain_direction_ok"], True, "Available-index slope must be negative")
-    assert_equal(available["loeo"]["status"], "not_ready", "LOEO stays blocked at four events")
+    assert_equal(available["loeo"]["status"], "not_ready", "LOEO stays blocked at three events")
     if available["in_sample"]["shadow_mae"] >= available["in_sample"]["historical_mae"]:
         raise AssertionError("Synthetic available-index candidate should improve in-sample MAE")
 
-    relationships = report.build_signal_relationships(rows, eligible_event_count=4)
+    relationships = report.build_signal_relationships(rows, eligible_event_count=3)
     available_relationship = next(
         row for row in relationships
         if row["feature"] == "live_available_index" and row["target_horizon_hours"] == 72
@@ -126,7 +126,7 @@ def test_shadow_fit_starts_at_four_events():
     assert_equal(
         available_relationship["status"],
         "diagnostic_only",
-        "Correlations become diagnostic at four events",
+        "Correlations become diagnostic at three events",
     )
     assert_equal(
         available_relationship["correlation_sign_matches_domain_expectation"],
@@ -185,14 +185,14 @@ def test_activation_review_never_enables_production():
 
 
 def test_shadow_adjustment_cap():
-    rows = make_linear_shadow_rows(4)
+    rows = make_linear_shadow_rows(3)
     model = {
         "name": "bias_only",
         "feature": None,
         "intercept": 20000.0,
         "slope": None,
-        "training_event_count": 4,
-        "training_row_count": 8,
+        "training_event_count": 3,
+        "training_row_count": 6,
         "domain_direction_ok": True,
     }
     row = rows[0]
@@ -207,19 +207,19 @@ def test_shadow_adjustment_cap():
 
 
 def test_markdown_exposes_staged_gates():
-    rows = make_linear_shadow_rows(4)
+    rows = make_linear_shadow_rows(3)
     events = report.build_event_reports(rows)
     summary = report.build_horizon_summary(rows)
-    relationships = report.build_signal_relationships(rows, eligible_event_count=4)
-    shadow = report.build_shadow_candidates(rows, eligible_event_count=4)
+    relationships = report.build_signal_relationships(rows, eligible_event_count=3)
+    shadow = report.build_shadow_candidates(rows, eligible_event_count=3)
 
     markdown = report.build_markdown(
         {
             "generated_at": "2026-09-29T00:00:00+00:00",
             "calibration": {
-                "eligible_completed_league_events": 4,
-                "minimum_required_events": 4,
-                "shadow_fit_minimum_events": 4,
+                "eligible_completed_league_events": 3,
+                "minimum_required_events": 3,
+                "shadow_fit_minimum_events": 3,
                 "loeo_minimum_events": 5,
                 "activation_review_minimum_events": 6,
                 "ready_for_candidate_fit": True,
@@ -233,10 +233,10 @@ def test_markdown_exposes_staged_gates():
         }
     )
     for required in (
-        "Shadow fit gate",
+        "Live candidate fit gate",
         "LOEO gate",
         "Activation review gate",
-        "Production live correction: **OFF**",
+        "Production mode: **CONTROLLED LIVE BLEND**",
         "Shadow live-correction candidates",
     ):
         if required not in markdown:
@@ -245,7 +245,7 @@ def test_markdown_exposes_staged_gates():
 
 def main():
     test_basic_reports()
-    test_shadow_fit_starts_at_four_events()
+    test_live_candidate_fit_starts_at_three_events()
     test_loeo_starts_at_five_events_and_holds_out_whole_events()
     test_activation_review_never_enables_production()
     test_shadow_adjustment_cap()
