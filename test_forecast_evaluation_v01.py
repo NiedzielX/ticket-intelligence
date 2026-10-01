@@ -57,13 +57,29 @@ def main():
         "historical_p50": 33000,
         "final_p50": 33000,
         "forecast_status": "historical_baseline_with_live_observation",
-        "correction_status": "pending_empirical_calibration",
+        "correction_status": "controlled_live_blend_v01",
+        "live_adjustment": -400,
+        "payload": {
+            "correction": {
+                "selected_candidate": "available_index_linear",
+                "training_event_count": 3,
+                "candidate_p50": 30000,
+                "candidate_adjustment": -3000,
+                "blend_weight": 0.20,
+            }
+        },
         "signal_readiness": "24h_ready",
     }
     row = evaluator.make_evaluation_row(event, outcome, observation, 72)
     assert_equal(row["historical_error"], 2000, "Residual target must be actual minus historical P50")
     assert_equal(row["historical_abs_error"], 2000, "Absolute historical error")
     assert_equal(row["horizon_early_gap_hours"], 0.5, "Horizon gap")
+    assert_equal(row["candidate_name"], "available_index_linear", "Candidate name")
+    assert_equal(row["candidate_p50"], 30000, "Candidate P50")
+    assert_equal(row["candidate_error"], 5000, "Candidate error")
+    assert_equal(row["candidate_abs_error"], 5000, "Candidate absolute error")
+    assert_equal(row["production_blend_weight"], 0.20, "Blend weight")
+    assert_equal(row["live_adjustment"], -400, "Persisted production adjustment")
 
     staged_rows = []
     for event_id in range(1, 7):
@@ -71,10 +87,10 @@ def main():
         staged["ticket_event_id"] = event_id
         staged_rows.append(staged)
 
-    status_four = evaluator.calibration_status(staged_rows[:4])
-    assert_equal(status_four["ready_for_candidate_fit"], True, "Four events enable shadow fit")
-    assert_equal(status_four["ready_for_loeo"], False, "Four events do not enable LOEO")
-    assert_equal(status_four["live_correction_active"], False, "Production correction remains off")
+    status_three = evaluator.calibration_status(staged_rows[:3])
+    assert_equal(status_three["ready_for_candidate_fit"], True, "Three events enable live candidate fit")
+    assert_equal(status_three["ready_for_loeo"], False, "Three events do not enable LOEO")
+    assert_equal(status_three["live_correction_active"], False, "Full production correction remains off")
 
     status_five = evaluator.calibration_status(staged_rows[:5])
     assert_equal(status_five["ready_for_loeo"], True, "Five events enable LOEO")
