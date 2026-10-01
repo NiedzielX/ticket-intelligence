@@ -309,6 +309,11 @@ def main():
                 "persist_forecast_observation_v01.py",
                 env,
             )
+            run_step(
+                f"Build live forecast monitor for {event_id}",
+                "build_live_forecast_monitor_v01.py",
+                env,
+            )
             succeeded += 1
         except Exception as exc:
             failed += 1
