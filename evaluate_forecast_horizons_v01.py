@@ -275,6 +275,8 @@ def calibration_status(evaluation_rows):
         "ready_for_loeo": count >= SHADOW_LOEO_MIN_EVENTS,
         "ready_for_activation_review": count >= ACTIVATION_REVIEW_MIN_EVENTS,
         "live_correction_active": False,
+        "controlled_blend_runtime_eligible": count >= SHADOW_FIT_MIN_EVENTS,
+        "full_live_correction_active": False,
         "rule": (
             "Fit guarded live candidates from three distinct completed league events. "
             "Start leave-one-event-out validation from five events. Six events opens "
