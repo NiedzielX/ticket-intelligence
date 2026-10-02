@@ -1,0 +1,104 @@
+name: Risk-On One Shot v0.1
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/risk-on-one-shot-v01.yml
+
+concurrency:
+  group: risk-on-one-shot-v01
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      EVENT_PROVIDER: "roboticket"
+      EVENT_HOME_TEAM: "Lech Poznań"
+      FORECAST_MODEL_VERSION: "beyond-forecast-v0.3"
+      FORCE_INTELLIGENCE: "true"
+      FORECAST_MIN_INTERVAL_MINUTES: "0"
+      MAX_LIVE_SNAPSHOT_AGE_MINUTES: "20"
+      LIVE_CANDIDATE_MIN_EVENTS: "3"
+      LIVE_BLEND_WEIGHT: "0.20"
+      RISK_ON_BLEND_WEIGHT: "0.35"
+      RISK_ON_LOEO_MIN_EVENTS: "3"
+      RISK_ON_LOEO_TRAIN_MIN_EVENTS: "2"
+      LIVE_CANDIDATE_MAX_ADJUSTMENT_RATIO: "0.20"
+      LIVE_PRODUCTION_MAX_ADJUSTMENT_RATIO: "0.10"
+      SHADOW_FIT_MIN_EVENTS: "3"
+      SHADOW_MAX_ADJUSTMENT_RATIO: "0.20"
+      TRANSIENT_JUMP_THRESHOLD: "500"
+      TRANSIENT_RETURN_TOLERANCE: "100"
+      SNAPSHOT_GAP_THRESHOLD_HOURS: "2.5"
+      WINDOW_MAX_OVERSHOOT_HOURS: "2.5"
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      ROBOTICKET_USERNAME: ${{ secrets.ROBOTICKET_USERNAME }}
+      ROBOTICKET_PASSWORD: ${{ secrets.ROBOTICKET_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pandas numpy requests scikit-learn joblib
+          python -m playwright install chromium
+
+      - name: Validate risk-on and override contracts
+        run: |
+          python test_beyond_live_correction_v01.py
+          python test_event_overrides_v01.py
+          python test_live_forecast_monitor_v01.py
+
+      - name: Discover active Roboticket events
+        run: python discover_roboticket_events_v01.py
+
+      - name: Apply confirmed event overrides
+        run: python apply_roboticket_event_overrides_v01.py
+
+      - name: Collect one fresh inventory snapshot
+        run: python collect_discovered_events_v01.py
+
+      - name: Run forced v0.3 intelligence
+        run: python run_active_event_intelligence_v01.py
+
+      - name: Publish monitor summaries
+        if: always()
+        run: |
+          if compgen -G "live_forecast_monitor_artifacts_v01/*.md" > /dev/null; then
+            for FILE in live_forecast_monitor_artifacts_v01/*.md; do
+              cat "$FILE" >> "$GITHUB_STEP_SUMMARY"
+              printf "\n\n---\n\n" >> "$GITHUB_STEP_SUMMARY"
+            done
+          fi
+
+      - name: Upload one-shot diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: risk-on-one-shot-v0-1
+          path: |
+            roboticket_discovery_artifacts_v01/
+            collector_results_v01/
+            active_ticket_event_matrix.json
+            live_ticket_artifacts_v01/
+            beyond_forecast_artifacts_v01/
+            live_forecast_monitor_artifacts_v01/
+          if-no-files-found: ignore
+          retention-days: 7
