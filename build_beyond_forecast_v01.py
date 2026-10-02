@@ -15,7 +15,7 @@ import build_calibration_report_v01 as calibration_v01
 import evaluate_forecast_horizons_v01 as evaluation_v01
 import run_lech_demand_study_v13 as model_v13
 
-VERSION = "beyond-forecast-v0.2"
+VERSION = "beyond-forecast-v0.3"
 EVENT_ID = int(os.environ["EVENT_ID"])
 EVENT_PROVIDER = os.getenv("EVENT_PROVIDER", "roboticket")
 TOTAL_MATCHES = int(os.getenv("TOTAL_LEAGUE_MATCHES_PER_TEAM", "34"))
@@ -24,7 +24,7 @@ VALIDATE = os.getenv("VALIDATE_BASELINE", "false").lower() == "true"
 EXPECTED_MAE = float(os.getenv("EXPECTED_HOLDOUT_MAE", "5321.8"))
 MAE_TOLERANCE = float(os.getenv("HOLDOUT_MAE_TOLERANCE", "1.0"))
 LIVE_CANDIDATE_MIN_EVENTS = int(os.getenv("LIVE_CANDIDATE_MIN_EVENTS", "3"))
-LIVE_BLEND_WEIGHT = float(os.getenv("LIVE_BLEND_WEIGHT", "0.20"))
+LIVE_BLEND_WEIGHT = float(os.getenv("LIVE_BLEND_WEIGHT", "0.20"))\nRISK_ON_BLEND_WEIGHT = float(os.getenv("RISK_ON_BLEND_WEIGHT", "0.35"))
 LIVE_CANDIDATE_MAX_ADJUSTMENT_RATIO = float(
     os.getenv("LIVE_CANDIDATE_MAX_ADJUSTMENT_RATIO", "0.20")
 )
@@ -498,6 +498,12 @@ def build_controlled_live_correction(event, historical, live):
         score = calibration_v01.score_shadow_candidate(model, rows)
         projection = project_live_candidate(model, historical_p50, live)
         passes = candidate_passes_runtime_guardrails(model, score, projection)
+        risk_on_loeo = calibration_v01.risk_on_loeo_candidate(rows, candidate_name)
+        risk_on_passes = bool(
+            passes
+            and risk_on_loeo.get("status") == "ready"
+            and risk_on_loeo.get("passes_risk_on_guardrails")
+        )
         candidate = {
             "name": candidate_name,
             "feature": model.get("feature"),
@@ -521,18 +527,37 @@ def build_controlled_live_correction(event, historical, live):
             "training_improved_event_count": score.get("improved_event_count"),
             "training_worsened_event_count": score.get("worsened_event_count"),
             "runtime_guardrails_pass": passes,
+            "risk_on_guardrails_pass": risk_on_passes,
+            "risk_on_loeo": {
+                key: calibration_v01.round_or_none(value, 2)
+                if isinstance(value, float)
+                else value
+                for key, value in risk_on_loeo.items()
+                if key not in {"event_scores", "predictions"}
+            },
             "projection": projection,
         }
         candidates.append(candidate)
         by_name[candidate_name] = candidate
 
     selected = None
-    available = by_name.get("available_index_linear")
-    bias = by_name.get("bias_only")
-    if available and available["runtime_guardrails_pass"]:
-        selected = available
-    elif bias and bias["runtime_guardrails_pass"]:
-        selected = bias
+    risk_on_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.get("risk_on_guardrails_pass")
+    ]
+    if risk_on_candidates:
+        selected = min(
+            risk_on_candidates,
+            key=lambda candidate: candidate["risk_on_loeo"]["shadow_mae"],
+        )
+    else:
+        available = by_name.get("available_index_linear")
+        bias = by_name.get("bias_only")
+        if available and available["runtime_guardrails_pass"]:
+            selected = available
+        elif bias and bias["runtime_guardrails_pass"]:
+            selected = bias
 
     if selected is None:
         return {
@@ -553,7 +578,13 @@ def build_controlled_live_correction(event, historical, live):
 
     projection = selected["projection"]
     candidate_adjustment = float(projection["candidate_adjustment"])
-    requested_adjustment = candidate_adjustment * LIVE_BLEND_WEIGHT
+    risk_on_active = bool(
+        selected.get("risk_on_guardrails_pass")
+        and live.get("signal_readiness") == "24h_ready"
+        and not live.get("data_gap_detected")
+    )
+    blend_weight = RISK_ON_BLEND_WEIGHT if risk_on_active else LIVE_BLEND_WEIGHT
+    requested_adjustment = candidate_adjustment * blend_weight
     production_cap = abs(float(historical_p50)) * LIVE_PRODUCTION_MAX_ADJUSTMENT_RATIO
     live_adjustment = max(
         -production_cap,
@@ -566,14 +597,21 @@ def build_controlled_live_correction(event, historical, live):
         return round(float(np.clip(float(value) + live_adjustment, 0, STADIUM_CAPACITY)))
 
     return {
-        "status": "controlled_live_blend_v01",
+        "status": (
+            "controlled_live_blend_risk_on_v01"
+            if risk_on_active
+            else "controlled_live_blend_v01"
+        ),
         "selected_candidate": selected["name"],
         "training_event_count": len(training_event_ids),
         "training_event_ids": training_event_ids,
         "minimum_training_events": LIVE_CANDIDATE_MIN_EVENTS,
         "candidate_p50": projection["candidate_p50"],
         "candidate_adjustment": projection["candidate_adjustment"],
-        "blend_weight": LIVE_BLEND_WEIGHT,
+        "blend_weight": blend_weight,
+        "risk_on_active": risk_on_active,
+        "risk_on_blend_weight": RISK_ON_BLEND_WEIGHT,
+        "base_blend_weight": LIVE_BLEND_WEIGHT,
         "production_adjustment_cap_ratio": LIVE_PRODUCTION_MAX_ADJUSTMENT_RATIO,
         "candidate_adjustment_cap_ratio": LIVE_CANDIDATE_MAX_ADJUSTMENT_RATIO,
         "live_adjustment_applied": round(live_adjustment),
@@ -609,9 +647,11 @@ def main():
             **correction,
             "rule": (
                 "From three prior completed league events, fit simple event-balanced candidates "
-                "using only strict as-of historical horizons. Apply at most a 20% blend of the "
-                "selected candidate correction, subject to runtime guardrails and a production cap. "
-                "The active target event is never used for its own correction training."
+                "using only strict as-of historical horizons. Run a three-event leave-one-event-out "
+                "risk check by training each fold on the other two events. When that risk check passes "
+                "and live readiness is 24h_ready, apply a 35% blend; otherwise use the base 20% blend. "
+                "The production cap remains 10% of historical P50 and the active target event is never "
+                "used for its own correction training."
             ),
         },
         "forecast": {
@@ -620,9 +660,12 @@ def main():
             "p90": correction.get("production_p90"),
             "live_adjustment": live_adjustment,
             "status": (
-                "historical_baseline_with_controlled_live_blend"
-                if correction.get("status") == "controlled_live_blend_v01"
+                "historical_baseline_with_risk_on_live_blend"
+                if correction.get("status") == "controlled_live_blend_risk_on_v01"
                 else (
+                    "historical_baseline_with_controlled_live_blend"
+                    if correction.get("status") == "controlled_live_blend_v01"
+                    else (
                     "historical_baseline_with_live_observation"
                     if historical.get("status") == "available"
                     else "live_observation_only"
