@@ -328,7 +328,7 @@ def live_signal(event):
     latest = live_v01.calculate_features(clean)[-1]
     keys = [
         "snapshot_id", "captured_at", "hours_to_kickoff", "days_to_match",
-        "signal_readiness", "history_hours", "sector_count", "available_total",
+        "signal_readiness", "data_gap_detected", "history_hours", "sector_count", "available_total",
         "first_available_total", "available_index", "net_removed_since_first",
         "net_removed_since_previous", "inventory_velocity_since_previous",
         "net_removed_6h", "inventory_velocity_6h", "net_removed_24h",
