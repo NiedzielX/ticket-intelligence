@@ -662,14 +662,11 @@ def main():
             "status": (
                 "historical_baseline_with_risk_on_live_blend"
                 if correction.get("status") == "controlled_live_blend_risk_on_v01"
-                else (
-                    "historical_baseline_with_controlled_live_blend"
-                    if correction.get("status") == "controlled_live_blend_v01"
-                    else (
-                    "historical_baseline_with_live_observation"
-                    if historical.get("status") == "available"
-                    else "live_observation_only"
-                )
+                else "historical_baseline_with_controlled_live_blend"
+                if correction.get("status") == "controlled_live_blend_v01"
+                else "historical_baseline_with_live_observation"
+                if historical.get("status") == "available"
+                else "live_observation_only"
             ),
         },
         "no_leakage": {
@@ -693,7 +690,8 @@ def main():
         f"Historical: {historical.get('status')} | P50: {historical.get('p50')} | "
         f"candidate: {correction.get('selected_candidate')} | "
         f"candidate P50: {correction.get('candidate_p50')} | "
-        f"production P50: {production_p50} | adjustment: {live_adjustment}"
+        f"production P50: {production_p50} | adjustment: {live_adjustment} | "
+        f"blend: {correction.get('blend_weight')} | risk_on: {correction.get('risk_on_active')}"
     )
     print(f"Output: {path}\nSUCCESS")
 
