@@ -20,6 +20,7 @@ on:
       - run_active_event_intelligence_v01.py
       - test_run_active_event_intelligence_v01.py
       - test_discover_roboticket_events_v01.py
+      - test_event_overrides_v01.py
       - test_live_ticket_features_v01.py
       - test_forecast_live_quality_v01.py
       - test_beyond_live_correction_v01.py
@@ -75,6 +76,7 @@ jobs:
         run: |
           python test_run_active_event_intelligence_v01.py
           python test_discover_roboticket_events_v01.py
+          python test_event_overrides_v01.py
           python test_live_ticket_features_v01.py
           python test_forecast_live_quality_v01.py
           python test_live_forecast_monitor_v01.py
