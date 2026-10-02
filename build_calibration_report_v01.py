@@ -635,6 +635,8 @@ def build_shadow_candidates(rows, eligible_event_count):
         ),
         "fit_minimum_events": SHADOW_FIT_MIN_EVENTS,
         "loeo_minimum_events": SHADOW_LOEO_MIN_EVENTS,
+        "risk_on_loeo_minimum_events": RISK_ON_LOEO_MIN_EVENTS,
+        "risk_on_loeo_train_minimum_events": RISK_ON_LOEO_TRAIN_MIN_EVENTS,
         "activation_review_minimum_events": ACTIVATION_REVIEW_MIN_EVENTS,
         "max_adjustment_ratio": SHADOW_MAX_ADJUSTMENT_RATIO,
         "production_live_correction_active": False,
@@ -897,7 +899,7 @@ def build_markdown(report):
         "",
         "Production mode: **CONTROLLED LIVE BLEND** when runtime guardrails pass; otherwise historical P50 is kept.",
         "",
-        "The candidate may move by up to ±20% of historical P50, but production uses only a 20% blend of that candidate correction. Full candidate activation remains disabled.",
+        "Base production uses a 20% blend. From three completed events, an early leave-one-event-out risk check trains each fold on the other two events; when it passes and live readiness is 24h_ready, production uses a 35% risk-on blend. The candidate itself remains capped at ±20% of historical P50 and the production cap remains ±10%.",
         "",
     ]
 
@@ -1033,8 +1035,8 @@ def build_markdown(report):
             "",
             "## Decision rule",
             "",
-            "Three completed league events allow a guarded forward live candidate and controlled 20% production blend. Five allow leave-one-event-out validation with complete events held out. Six opens a broader activation review.",
-            "At runtime, a candidate is blended only when event-balanced training MAE improves, more prior events improve than worsen, and the available-index direction is sensible. Full candidate activation remains disabled.",
+            "Three completed league events allow a guarded forward live candidate. They also allow an early risk-on leave-one-event-out check, where each fold trains on two events and tests on the third. A passing early LOEO plus 24h_ready live data can raise the blend from 20% to 35%. Five events remain the formal LOEO gate and six open a broader activation review.",
+            "At runtime, a candidate must first pass the existing training guardrails. Risk-on additionally requires positive early-LOEO MAE improvement, improvement on at least two held-out events, more held-out improvements than regressions, and direction consistency for available-index candidates. Full candidate activation remains disabled.",
             "",
         ]
     )
@@ -1062,6 +1064,7 @@ def main():
         "activation_review_minimum_events": ACTIVATION_REVIEW_MIN_EVENTS,
         "ready_for_candidate_fit": eligible_count >= SHADOW_FIT_MIN_EVENTS,
         "ready_for_loeo": eligible_count >= SHADOW_LOEO_MIN_EVENTS,
+        "ready_for_risk_on_loeo": eligible_count >= RISK_ON_LOEO_MIN_EVENTS,
         "ready_for_activation_review": eligible_count >= ACTIVATION_REVIEW_MIN_EVENTS,
         "competition": LEAGUE_COMPETITION,
         "live_correction_active": False,
@@ -1084,8 +1087,9 @@ def main():
         "interpretation_policy": {
             "inventory": "demand_proxy_not_confirmed_sales",
             "pre_calibration": "show_raw_trajectory_and_historical_error_only",
-            "forward_live_fit": "from three completed league events, fit simple event-balanced candidates and allow only a guarded 20% production blend",
-            "loeo_validation": "from five events, validate by holding out complete events rather than individual horizon rows",
+            "forward_live_fit": "from three completed league events, fit simple event-balanced candidates with a guarded 20% base production blend",
+            "risk_on_loeo": "from three events, run early LOEO with two training events per fold; if it passes and live readiness is 24h_ready, allow a 35% risk-on blend",
+            "loeo_validation": "from five events, run the formal validation by holding out complete events rather than individual horizon rows",
             "full_production_activation": "disabled; activation review requires a higher event gate and event-level out-of-sample improvement",
         },
     }
