@@ -16,7 +16,8 @@ MODEL_VERSION = os.getenv("FORECAST_MODEL_VERSION", "beyond-forecast-v0.3")
 OUTPUT_DIR = Path(os.getenv("LIVE_MONITOR_OUTPUT_DIR", "live_forecast_monitor_artifacts_v01"))
 PAGE_SIZE = 1000
 RECENT_TABLE_ROWS = int(os.getenv("LIVE_MONITOR_RECENT_ROWS", "18"))
-CONTROLLED_BLEND_WEIGHT = float(os.getenv("LIVE_BLEND_WEIGHT", "0.20"))\nRISK_ON_BLEND_WEIGHT = float(os.getenv("RISK_ON_BLEND_WEIGHT", "0.35"))
+CONTROLLED_BLEND_WEIGHT = float(os.getenv("LIVE_BLEND_WEIGHT", "0.20"))
+RISK_ON_BLEND_WEIGHT = float(os.getenv("RISK_ON_BLEND_WEIGHT", "0.35"))
 
 
 def api_get_all(path):
