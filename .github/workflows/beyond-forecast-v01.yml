@@ -98,6 +98,9 @@ jobs:
       HOLDOUT_MAE_TOLERANCE: "50.0"
       LIVE_CANDIDATE_MIN_EVENTS: "3"
       LIVE_BLEND_WEIGHT: "0.20"
+      RISK_ON_BLEND_WEIGHT: "0.35"
+      RISK_ON_LOEO_MIN_EVENTS: "3"
+      RISK_ON_LOEO_TRAIN_MIN_EVENTS: "2"
       LIVE_CANDIDATE_MAX_ADJUSTMENT_RATIO: "0.20"
       LIVE_PRODUCTION_MAX_ADJUSTMENT_RATIO: "0.10"
       SHADOW_FIT_MIN_EVENTS: "3"
@@ -140,6 +143,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: beyond-forecast-v0-2-${{ matrix.event.id }}
+          name: beyond-forecast-v0-3-${{ matrix.event.id }}
           path: beyond_forecast_artifacts_v01/
           retention-days: 7
