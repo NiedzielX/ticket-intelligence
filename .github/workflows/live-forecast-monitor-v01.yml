@@ -55,8 +55,9 @@ jobs:
     env:
       EVENT_PROVIDER: "roboticket"
       EVENT_HOME_TEAM: "Lech Poznań"
-      FORECAST_MODEL_VERSION: "beyond-forecast-v0.2"
+      FORECAST_MODEL_VERSION: "beyond-forecast-v0.3"
       LIVE_BLEND_WEIGHT: "0.20"
+      RISK_ON_BLEND_WEIGHT: "0.35"
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
 
