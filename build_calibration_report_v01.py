@@ -14,7 +14,7 @@ OUTPUT_DIR = Path(os.getenv("CALIBRATION_OUTPUT_DIR", "calibration_report_artifa
 EVALUATION_CSV = INPUT_DIR / "forecast_horizon_evaluation_v01.csv"
 EVALUATION_SUMMARY_JSON = INPUT_DIR / "forecast_evaluation_summary_v01.json"
 SHADOW_FIT_MIN_EVENTS = int(os.getenv("SHADOW_FIT_MIN_EVENTS", "3"))
-SHADOW_LOEO_MIN_EVENTS = int(os.getenv("SHADOW_LOEO_MIN_EVENTS", "5"))
+SHADOW_LOEO_MIN_EVENTS = int(os.getenv("SHADOW_LOEO_MIN_EVENTS", "5"))\nRISK_ON_LOEO_MIN_EVENTS = int(os.getenv("RISK_ON_LOEO_MIN_EVENTS", "3"))\nRISK_ON_LOEO_TRAIN_MIN_EVENTS = int(os.getenv("RISK_ON_LOEO_TRAIN_MIN_EVENTS", "2"))
 ACTIVATION_REVIEW_MIN_EVENTS = int(os.getenv("ACTIVATION_REVIEW_MIN_EVENTS", "6"))
 SHADOW_MAX_ADJUSTMENT_RATIO = float(os.getenv("SHADOW_MAX_ADJUSTMENT_RATIO", "0.20"))
 LEAGUE_COMPETITION = os.getenv("CALIBRATION_COMPETITION", "Ekstraklasa")
@@ -430,6 +430,131 @@ def loeo_shadow_candidate(rows, candidate_name):
         "tied_event_count": len(event_scores) - improved - worsened,
         "domain_direction_consistent_across_folds": direction_consistent,
         "passes_shadow_guardrails": passes_guardrails,
+        "event_scores": event_scores,
+        "predictions": predictions,
+    }
+
+
+def risk_on_loeo_candidate(rows, candidate_name):
+    feature = None if candidate_name == "bias_only" else "live_available_index"
+    usable = shadow_candidate_rows(rows, feature)
+    event_ids = sorted({int(row["ticket_event_id"]) for row in usable})
+    if len(event_ids) < RISK_ON_LOEO_MIN_EVENTS:
+        return {
+            "status": "not_ready",
+            "event_count": len(event_ids),
+            "minimum_events": RISK_ON_LOEO_MIN_EVENTS,
+            "minimum_training_events": RISK_ON_LOEO_TRAIN_MIN_EVENTS,
+            "predictions": [],
+        }
+
+    event_scores = []
+    predictions = []
+    direction_checks = []
+
+    for held_out_event_id in event_ids:
+        train_rows = [
+            row for row in usable
+            if int(row["ticket_event_id"]) != held_out_event_id
+        ]
+        test_rows = [
+            row for row in usable
+            if int(row["ticket_event_id"]) == held_out_event_id
+        ]
+        model = fit_shadow_candidate(
+            train_rows,
+            candidate_name,
+            minimum_events=RISK_ON_LOEO_TRAIN_MIN_EVENTS,
+        )
+        if model is None:
+            continue
+
+        direction_checks.append(bool(model.get("domain_direction_ok", True)))
+        fold_predictions = []
+
+        for row in test_rows:
+            prediction = shadow_prediction(model, row)
+            fold_predictions.append(prediction)
+            predictions.append(
+                {
+                    "candidate": candidate_name,
+                    "ticket_event_id": held_out_event_id,
+                    "target_horizon_hours": int(row["target_horizon_hours"]),
+                    "historical_p50": int(row["historical_p50"]),
+                    "actual_attendance": int(row["actual_attendance"]),
+                    "shadow_p50": round_or_none(prediction["shadow_p50"], 2),
+                    "historical_abs_error": round_or_none(
+                        prediction["historical_abs_error"], 2
+                    ),
+                    "shadow_abs_error": round_or_none(
+                        prediction["shadow_abs_error"], 2
+                    ),
+                    "fold_training_event_count": int(model["training_event_count"]),
+                }
+            )
+
+        if not fold_predictions:
+            continue
+
+        historical_mae = mean(
+            prediction["historical_abs_error"]
+            for prediction in fold_predictions
+        )
+        shadow_mae = mean(
+            prediction["shadow_abs_error"]
+            for prediction in fold_predictions
+        )
+        event_scores.append(
+            {
+                "ticket_event_id": held_out_event_id,
+                "historical_mae": historical_mae,
+                "shadow_mae": shadow_mae,
+                "mae_improvement": historical_mae - shadow_mae,
+            }
+        )
+
+    if len(event_scores) != len(event_ids):
+        return {
+            "status": "incomplete",
+            "event_count": len(event_scores),
+            "minimum_events": RISK_ON_LOEO_MIN_EVENTS,
+            "minimum_training_events": RISK_ON_LOEO_TRAIN_MIN_EVENTS,
+            "predictions": predictions,
+        }
+
+    historical_mae = mean(score["historical_mae"] for score in event_scores)
+    shadow_mae = mean(score["shadow_mae"] for score in event_scores)
+    improvement = (
+        None if historical_mae is None or shadow_mae is None
+        else historical_mae - shadow_mae
+    )
+    improved = sum(score["mae_improvement"] > 0 for score in event_scores)
+    worsened = sum(score["mae_improvement"] < 0 for score in event_scores)
+    direction_consistent = all(direction_checks) if direction_checks else False
+    passes = bool(
+        improvement is not None
+        and improvement > 0
+        and improved > worsened
+        and improved >= 2
+        and (
+            candidate_name != "available_index_linear"
+            or direction_consistent
+        )
+    )
+
+    return {
+        "status": "ready",
+        "event_count": len(event_scores),
+        "minimum_events": RISK_ON_LOEO_MIN_EVENTS,
+        "minimum_training_events": RISK_ON_LOEO_TRAIN_MIN_EVENTS,
+        "historical_mae": historical_mae,
+        "shadow_mae": shadow_mae,
+        "mae_improvement": improvement,
+        "improved_event_count": improved,
+        "worsened_event_count": worsened,
+        "tied_event_count": len(event_scores) - improved - worsened,
+        "domain_direction_consistent_across_folds": direction_consistent,
+        "passes_risk_on_guardrails": passes,
         "event_scores": event_scores,
         "predictions": predictions,
     }
