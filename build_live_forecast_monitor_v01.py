@@ -192,6 +192,23 @@ def normalize_observation(row):
         "training_event_count": correction.get("training_event_count"),
         "training_event_ids": correction.get("training_event_ids") or [],
         "guardrails_pass": guardrails,
+        "risk_on_active": correction.get("risk_on_active"),
+        "risk_on_guardrails_pass": (selected or {}).get("risk_on_guardrails_pass"),
+        "risk_on_loeo_historical_mae": number(
+            ((selected or {}).get("risk_on_loeo") or {}).get("historical_mae"), 2
+        ),
+        "risk_on_loeo_candidate_mae": number(
+            ((selected or {}).get("risk_on_loeo") or {}).get("shadow_mae"), 2
+        ),
+        "risk_on_loeo_mae_improvement": number(
+            ((selected or {}).get("risk_on_loeo") or {}).get("mae_improvement"), 2
+        ),
+        "risk_on_loeo_improved_event_count": (
+            ((selected or {}).get("risk_on_loeo") or {}).get("improved_event_count")
+        ),
+        "risk_on_loeo_worsened_event_count": (
+            ((selected or {}).get("risk_on_loeo") or {}).get("worsened_event_count")
+        ),
         "correction_status": row.get("correction_status"),
         "forecast_status": row.get("forecast_status"),
         "signal_readiness": row.get("signal_readiness"),
@@ -340,6 +357,10 @@ def build_markdown(monitor):
             "",
             f"- Selected candidate: **{latest.get('candidate_name') or 'none'}**",
             f"- Candidate guardrails: **{fmt_guardrail(latest.get('guardrails_pass'))}**",
+            f"- Risk-on active: **{latest.get('risk_on_active')}**",
+            f"- Risk-on LOEO guardrails: **{fmt_guardrail(latest.get('risk_on_guardrails_pass'))}**",
+            f"- Risk-on LOEO MAE: historical **{fmt_int(latest.get('risk_on_loeo_historical_mae'))}** → candidate **{fmt_int(latest.get('risk_on_loeo_candidate_mae'))}**; improvement **{fmt_int(latest.get('risk_on_loeo_mae_improvement'))}**",
+            f"- Risk-on held-out events improved / worsened: **{latest.get('risk_on_loeo_improved_event_count') or 0} / {latest.get('risk_on_loeo_worsened_event_count') or 0}**",
             f"- Correction status: **{latest.get('correction_status') or 'unknown'}**",
             f"- Production blend weight: **{fmt_float(latest.get('blend_weight'), 2)}**",
             f"- Training events: **{latest.get('training_event_count') or 0}** — {latest.get('training_event_ids') or []}",
@@ -416,6 +437,13 @@ CSV_FIELDS = [
     "training_event_count",
     "training_event_ids",
     "guardrails_pass",
+    "risk_on_active",
+    "risk_on_guardrails_pass",
+    "risk_on_loeo_historical_mae",
+    "risk_on_loeo_candidate_mae",
+    "risk_on_loeo_mae_improvement",
+    "risk_on_loeo_improved_event_count",
+    "risk_on_loeo_worsened_event_count",
     "correction_status",
     "forecast_status",
     "signal_readiness",
