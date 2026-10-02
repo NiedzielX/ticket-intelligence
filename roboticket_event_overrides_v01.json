@@ -10,5 +10,17 @@
     "mapping_source": "confirmed_roboticket_event+official_lech_schedule",
     "mapping_confidence": "confirmed",
     "url": "https://bilety.lechpoznan.pl/Stadium/Index?eventId=10235"
+  },
+  {
+    "id": "10333",
+    "provider": "roboticket",
+    "home_team": "Lech Poznań",
+    "away_team": "Bayer 04 Leverkusen",
+    "competition": "UEFA Europa League",
+    "match_date": "2026-10-15",
+    "kickoff_at": "2026-10-15T18:45:00+02:00",
+    "mapping_source": "confirmed_roboticket_event+official_roboticket_schedule",
+    "mapping_confidence": "confirmed",
+    "url": "https://bilety.lechpoznan.pl/Stadium?eventId=10333"
   }
 ]
