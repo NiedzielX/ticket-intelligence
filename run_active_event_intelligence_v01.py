@@ -25,7 +25,7 @@ FORECAST_MIN_INTERVAL_MINUTES = float(
 MAX_LIVE_SNAPSHOT_AGE_MINUTES = float(
     os.getenv("MAX_LIVE_SNAPSHOT_AGE_MINUTES", "20")
 )
-FORECAST_MODEL_VERSION = os.getenv("FORECAST_MODEL_VERSION", "beyond-forecast-v0.2")
+FORECAST_MODEL_VERSION = os.getenv("FORECAST_MODEL_VERSION", "beyond-forecast-v0.3")
 FORCE_INTELLIGENCE = os.getenv("FORCE_INTELLIGENCE", "false").lower() == "true"
 
 
