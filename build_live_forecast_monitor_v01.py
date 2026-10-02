@@ -12,11 +12,11 @@ SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
 EVENT_ID = int(os.environ["EVENT_ID"])
 EVENT_PROVIDER = os.getenv("EVENT_PROVIDER", "roboticket")
-MODEL_VERSION = os.getenv("FORECAST_MODEL_VERSION", "beyond-forecast-v0.2")
+MODEL_VERSION = os.getenv("FORECAST_MODEL_VERSION", "beyond-forecast-v0.3")
 OUTPUT_DIR = Path(os.getenv("LIVE_MONITOR_OUTPUT_DIR", "live_forecast_monitor_artifacts_v01"))
 PAGE_SIZE = 1000
 RECENT_TABLE_ROWS = int(os.getenv("LIVE_MONITOR_RECENT_ROWS", "18"))
-CONTROLLED_BLEND_WEIGHT = float(os.getenv("LIVE_BLEND_WEIGHT", "0.20"))
+CONTROLLED_BLEND_WEIGHT = float(os.getenv("LIVE_BLEND_WEIGHT", "0.20"))\nRISK_ON_BLEND_WEIGHT = float(os.getenv("RISK_ON_BLEND_WEIGHT", "0.35"))
 
 
 def api_get_all(path):
@@ -142,21 +142,29 @@ def normalize_observation(row):
     candidate_p50 = number(correction.get("candidate_p50"))
     blend_weight = number(correction.get("blend_weight"), 4)
 
+    reconstruction_blend = None
+    if correction_status == "controlled_live_blend_v01":
+        reconstruction_blend = CONTROLLED_BLEND_WEIGHT
+    elif correction_status == "controlled_live_blend_risk_on_v01":
+        reconstruction_blend = RISK_ON_BLEND_WEIGHT
+
     if (
         candidate_p50 is None
-        and correction_status == "controlled_live_blend_v01"
+        and reconstruction_blend
         and historical_p50 is not None
-        and CONTROLLED_BLEND_WEIGHT > 0
     ):
         candidate_adjustment = int(
-            round(float(production_adjustment) / CONTROLLED_BLEND_WEIGHT)
+            round(float(production_adjustment) / reconstruction_blend)
         )
         candidate_p50 = historical_p50 + candidate_adjustment
-        blend_weight = CONTROLLED_BLEND_WEIGHT
+        blend_weight = reconstruction_blend
         selected_name = selected_name or "controlled_live_candidate"
 
     guardrails = None
-    if correction_status == "controlled_live_blend_v01":
+    if correction_status in {
+        "controlled_live_blend_v01",
+        "controlled_live_blend_risk_on_v01",
+    }:
         guardrails = True
     elif selected_name:
         guardrails = bool((selected or {}).get("runtime_guardrails_pass"))
@@ -349,7 +357,7 @@ def build_markdown(monitor):
             f"- Velocity 24h: **{fmt_float(latest.get('velocity_24h'), 1)}**",
             f"- Acceleration 6h vs 24h: **{fmt_float(latest.get('acceleration_6h_vs_24h'), 1)}**",
             "",
-            "## Since first v0.2 observation",
+            "## Since first v0.3 observation",
             "",
             f"- Candidate P50: **{fmt_delta(changes.get('candidate_p50_since_first_v02'))}**",
             f"- Production P50: **{fmt_delta(changes.get('production_p50_since_first_v02'))}**",
@@ -383,7 +391,7 @@ def build_markdown(monitor):
     lines.extend(
         [
             "",
-            "Full v0.2 trajectory is available in the companion CSV artifact.",
+            "Full v0.3 trajectory is available in the companion CSV artifact.",
             "",
         ]
     )
