@@ -20,6 +20,7 @@ on:
       - run_active_event_intelligence_v01.py
       - test_run_active_event_intelligence_v01.py
       - test_discover_roboticket_events_v01.py
+      - test_event_overrides_v01.py
       - test_live_ticket_features_v01.py
       - test_forecast_live_quality_v01.py
       - test_beyond_live_correction_v01.py
@@ -75,6 +76,7 @@ jobs:
         run: |
           python test_run_active_event_intelligence_v01.py
           python test_discover_roboticket_events_v01.py
+          python test_event_overrides_v01.py
           python test_live_ticket_features_v01.py
           python test_forecast_live_quality_v01.py
           python test_live_forecast_monitor_v01.py
@@ -100,10 +102,13 @@ jobs:
       EVENT_HOME_TEAM: "Lech Poznań"
       FORECAST_MIN_INTERVAL_MINUTES: "50"
       MAX_LIVE_SNAPSHOT_AGE_MINUTES: "20"
-      FORECAST_MODEL_VERSION: "beyond-forecast-v0.2"
+      FORECAST_MODEL_VERSION: "beyond-forecast-v0.3"
       FORCE_INTELLIGENCE: "false"
       LIVE_CANDIDATE_MIN_EVENTS: "3"
       LIVE_BLEND_WEIGHT: "0.20"
+      RISK_ON_BLEND_WEIGHT: "0.35"
+      RISK_ON_LOEO_MIN_EVENTS: "3"
+      RISK_ON_LOEO_TRAIN_MIN_EVENTS: "2"
       LIVE_CANDIDATE_MAX_ADJUSTMENT_RATIO: "0.20"
       LIVE_PRODUCTION_MAX_ADJUSTMENT_RATIO: "0.10"
       SHADOW_FIT_MIN_EVENTS: "3"

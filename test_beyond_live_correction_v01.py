@@ -7,6 +7,9 @@ os.environ.setdefault("SUPABASE_SECRET_KEY", "test-key")
 os.environ.setdefault("EVENT_ID", "999")
 os.environ.setdefault("LIVE_CANDIDATE_MIN_EVENTS", "3")
 os.environ.setdefault("LIVE_BLEND_WEIGHT", "0.20")
+os.environ.setdefault("RISK_ON_BLEND_WEIGHT", "0.35")
+os.environ.setdefault("RISK_ON_LOEO_MIN_EVENTS", "3")
+os.environ.setdefault("RISK_ON_LOEO_TRAIN_MIN_EVENTS", "2")
 os.environ.setdefault("LIVE_CANDIDATE_MAX_ADJUSTMENT_RATIO", "0.20")
 os.environ.setdefault("LIVE_PRODUCTION_MAX_ADJUSTMENT_RATIO", "0.10")
 os.environ.setdefault("SHADOW_FIT_MIN_EVENTS", "3")
@@ -74,16 +77,17 @@ def test_three_events_enable_forward_available_index_blend():
     finally:
         forecast.prior_live_correction_rows = original
 
-    assert_equal(correction["status"], "controlled_live_blend_v01", "Controlled blend status")
+    assert_equal(correction["status"], "controlled_live_blend_risk_on_v01", "Risk-on blend status")
     assert_equal(correction["selected_candidate"], "available_index_linear", "Available-index candidate")
     assert_equal(correction["training_event_count"], 3, "Three prior events")
     assert_equal(correction["training_event_ids"], [1, 2, 3], "Training event ids")
-    assert_equal(correction["blend_weight"], 0.20, "Production blend weight")
+    assert_equal(correction["blend_weight"], 0.35, "Risk-on production blend weight")
+    assert_equal(correction["risk_on_active"], True, "Risk-on activation")
     assert_equal(correction["candidate_p50"], 35000, "Forward candidate P50")
-    assert_equal(correction["live_adjustment_applied"], -600, "Only 20% of candidate correction applied")
-    assert_equal(correction["production_p50"], 37400, "Controlled production P50")
-    assert_equal(correction["production_p10"], 29400, "Interval shifted consistently")
-    assert_equal(correction["production_p90"], 42400, "Interval shifted consistently")
+    assert_equal(correction["live_adjustment_applied"], -1050, "Risk-on 35% candidate correction applied")
+    assert_equal(correction["production_p50"], 36950, "Risk-on production P50")
+    assert_equal(correction["production_p10"], 28950, "Interval shifted consistently")
+    assert_equal(correction["production_p90"], 41950, "Interval shifted consistently")
 
     available = next(
         item for item in correction["candidates"]
@@ -91,6 +95,44 @@ def test_three_events_enable_forward_available_index_blend():
     )
     assert_equal(available["domain_direction_ok"], True, "Available-index direction")
     assert_equal(available["runtime_guardrails_pass"], True, "Runtime guardrails")
+    assert_equal(available["risk_on_guardrails_pass"], True, "Three-event LOEO guardrails")
+    assert_equal(available["risk_on_loeo"]["event_count"], 3, "Three LOEO folds")
+    assert_equal(
+        available["risk_on_loeo"]["minimum_training_events"],
+        2,
+        "Each risk-on fold may train on two events",
+    )
+
+
+def test_risk_on_requires_24h_readiness():
+    rows = synthetic_training_rows()
+    original = forecast.prior_live_correction_rows
+    try:
+        forecast.prior_live_correction_rows = lambda event: (rows, [1, 2, 3])
+        correction = forecast.build_controlled_live_correction(
+            {
+                "id": 4,
+                "competition": "Ekstraklasa",
+                "kickoff_at": "2026-10-18T15:30:00+00:00",
+            },
+            {
+                "status": "available",
+                "p10": 30000,
+                "p50": 38000,
+                "p90": 43000,
+            },
+            {
+                "signal_readiness": "short_history",
+                "available_index": 0.95,
+            },
+        )
+    finally:
+        forecast.prior_live_correction_rows = original
+
+    assert_equal(correction["status"], "controlled_live_blend_v01", "Short history stays base blend")
+    assert_equal(correction["risk_on_active"], False, "Risk-on blocked without 24h readiness")
+    assert_equal(correction["blend_weight"], 0.20, "Base blend retained")
+    assert_equal(correction["live_adjustment_applied"], -600, "Base correction applied")
 
 
 def test_two_events_keep_historical_forecast():
@@ -207,6 +249,7 @@ def test_target_and_future_events_are_excluded_from_training():
 
 def main():
     test_three_events_enable_forward_available_index_blend()
+    test_risk_on_requires_24h_readiness()
     test_two_events_keep_historical_forecast()
     test_data_gap_blocks_available_index_projection()
     test_target_and_future_events_are_excluded_from_training()

@@ -15,6 +15,8 @@ EVALUATION_CSV = INPUT_DIR / "forecast_horizon_evaluation_v01.csv"
 EVALUATION_SUMMARY_JSON = INPUT_DIR / "forecast_evaluation_summary_v01.json"
 SHADOW_FIT_MIN_EVENTS = int(os.getenv("SHADOW_FIT_MIN_EVENTS", "3"))
 SHADOW_LOEO_MIN_EVENTS = int(os.getenv("SHADOW_LOEO_MIN_EVENTS", "5"))
+RISK_ON_LOEO_MIN_EVENTS = int(os.getenv("RISK_ON_LOEO_MIN_EVENTS", "3"))
+RISK_ON_LOEO_TRAIN_MIN_EVENTS = int(os.getenv("RISK_ON_LOEO_TRAIN_MIN_EVENTS", "2"))
 ACTIVATION_REVIEW_MIN_EVENTS = int(os.getenv("ACTIVATION_REVIEW_MIN_EVENTS", "6"))
 SHADOW_MAX_ADJUSTMENT_RATIO = float(os.getenv("SHADOW_MAX_ADJUSTMENT_RATIO", "0.20"))
 LEAGUE_COMPETITION = os.getenv("CALIBRATION_COMPETITION", "Ekstraklasa")
@@ -435,6 +437,131 @@ def loeo_shadow_candidate(rows, candidate_name):
     }
 
 
+def risk_on_loeo_candidate(rows, candidate_name):
+    feature = None if candidate_name == "bias_only" else "live_available_index"
+    usable = shadow_candidate_rows(rows, feature)
+    event_ids = sorted({int(row["ticket_event_id"]) for row in usable})
+    if len(event_ids) < RISK_ON_LOEO_MIN_EVENTS:
+        return {
+            "status": "not_ready",
+            "event_count": len(event_ids),
+            "minimum_events": RISK_ON_LOEO_MIN_EVENTS,
+            "minimum_training_events": RISK_ON_LOEO_TRAIN_MIN_EVENTS,
+            "predictions": [],
+        }
+
+    event_scores = []
+    predictions = []
+    direction_checks = []
+
+    for held_out_event_id in event_ids:
+        train_rows = [
+            row for row in usable
+            if int(row["ticket_event_id"]) != held_out_event_id
+        ]
+        test_rows = [
+            row for row in usable
+            if int(row["ticket_event_id"]) == held_out_event_id
+        ]
+        model = fit_shadow_candidate(
+            train_rows,
+            candidate_name,
+            minimum_events=RISK_ON_LOEO_TRAIN_MIN_EVENTS,
+        )
+        if model is None:
+            continue
+
+        direction_checks.append(bool(model.get("domain_direction_ok", True)))
+        fold_predictions = []
+
+        for row in test_rows:
+            prediction = shadow_prediction(model, row)
+            fold_predictions.append(prediction)
+            predictions.append(
+                {
+                    "candidate": candidate_name,
+                    "ticket_event_id": held_out_event_id,
+                    "target_horizon_hours": int(row["target_horizon_hours"]),
+                    "historical_p50": int(row["historical_p50"]),
+                    "actual_attendance": int(row["actual_attendance"]),
+                    "shadow_p50": round_or_none(prediction["shadow_p50"], 2),
+                    "historical_abs_error": round_or_none(
+                        prediction["historical_abs_error"], 2
+                    ),
+                    "shadow_abs_error": round_or_none(
+                        prediction["shadow_abs_error"], 2
+                    ),
+                    "fold_training_event_count": int(model["training_event_count"]),
+                }
+            )
+
+        if not fold_predictions:
+            continue
+
+        historical_mae = mean(
+            prediction["historical_abs_error"]
+            for prediction in fold_predictions
+        )
+        shadow_mae = mean(
+            prediction["shadow_abs_error"]
+            for prediction in fold_predictions
+        )
+        event_scores.append(
+            {
+                "ticket_event_id": held_out_event_id,
+                "historical_mae": historical_mae,
+                "shadow_mae": shadow_mae,
+                "mae_improvement": historical_mae - shadow_mae,
+            }
+        )
+
+    if len(event_scores) != len(event_ids):
+        return {
+            "status": "incomplete",
+            "event_count": len(event_scores),
+            "minimum_events": RISK_ON_LOEO_MIN_EVENTS,
+            "minimum_training_events": RISK_ON_LOEO_TRAIN_MIN_EVENTS,
+            "predictions": predictions,
+        }
+
+    historical_mae = mean(score["historical_mae"] for score in event_scores)
+    shadow_mae = mean(score["shadow_mae"] for score in event_scores)
+    improvement = (
+        None if historical_mae is None or shadow_mae is None
+        else historical_mae - shadow_mae
+    )
+    improved = sum(score["mae_improvement"] > 0 for score in event_scores)
+    worsened = sum(score["mae_improvement"] < 0 for score in event_scores)
+    direction_consistent = all(direction_checks) if direction_checks else False
+    passes = bool(
+        improvement is not None
+        and improvement > 0
+        and improved > worsened
+        and improved >= 2
+        and (
+            candidate_name != "available_index_linear"
+            or direction_consistent
+        )
+    )
+
+    return {
+        "status": "ready",
+        "event_count": len(event_scores),
+        "minimum_events": RISK_ON_LOEO_MIN_EVENTS,
+        "minimum_training_events": RISK_ON_LOEO_TRAIN_MIN_EVENTS,
+        "historical_mae": historical_mae,
+        "shadow_mae": shadow_mae,
+        "mae_improvement": improvement,
+        "improved_event_count": improved,
+        "worsened_event_count": worsened,
+        "tied_event_count": len(event_scores) - improved - worsened,
+        "domain_direction_consistent_across_folds": direction_consistent,
+        "passes_risk_on_guardrails": passes,
+        "event_scores": event_scores,
+        "predictions": predictions,
+    }
+
+
 def build_shadow_candidates(rows, eligible_event_count):
     candidate_names = ["bias_only", "available_index_linear"]
     candidates = []
@@ -508,6 +635,8 @@ def build_shadow_candidates(rows, eligible_event_count):
         ),
         "fit_minimum_events": SHADOW_FIT_MIN_EVENTS,
         "loeo_minimum_events": SHADOW_LOEO_MIN_EVENTS,
+        "risk_on_loeo_minimum_events": RISK_ON_LOEO_MIN_EVENTS,
+        "risk_on_loeo_train_minimum_events": RISK_ON_LOEO_TRAIN_MIN_EVENTS,
         "activation_review_minimum_events": ACTIVATION_REVIEW_MIN_EVENTS,
         "max_adjustment_ratio": SHADOW_MAX_ADJUSTMENT_RATIO,
         "production_live_correction_active": False,
@@ -770,7 +899,7 @@ def build_markdown(report):
         "",
         "Production mode: **CONTROLLED LIVE BLEND** when runtime guardrails pass; otherwise historical P50 is kept.",
         "",
-        "The candidate may move by up to ±20% of historical P50, but production uses only a 20% blend of that candidate correction. Full candidate activation remains disabled.",
+        "Base production uses a 20% blend. From three completed events, an early leave-one-event-out risk check trains each fold on the other two events; when it passes and live readiness is 24h_ready, production uses a 35% risk-on blend. The candidate itself remains capped at ±20% of historical P50 and the production cap remains ±10%.",
         "",
     ]
 
@@ -906,8 +1035,8 @@ def build_markdown(report):
             "",
             "## Decision rule",
             "",
-            "Three completed league events allow a guarded forward live candidate and controlled 20% production blend. Five allow leave-one-event-out validation with complete events held out. Six opens a broader activation review.",
-            "At runtime, a candidate is blended only when event-balanced training MAE improves, more prior events improve than worsen, and the available-index direction is sensible. Full candidate activation remains disabled.",
+            "Three completed league events allow a guarded forward live candidate. They also allow an early risk-on leave-one-event-out check, where each fold trains on two events and tests on the third. A passing early LOEO plus 24h_ready live data can raise the blend from 20% to 35%. Five events remain the formal LOEO gate and six open a broader activation review.",
+            "At runtime, a candidate must first pass the existing training guardrails. Risk-on additionally requires positive early-LOEO MAE improvement, improvement on at least two held-out events, more held-out improvements than regressions, and direction consistency for available-index candidates. Full candidate activation remains disabled.",
             "",
         ]
     )
@@ -935,6 +1064,7 @@ def main():
         "activation_review_minimum_events": ACTIVATION_REVIEW_MIN_EVENTS,
         "ready_for_candidate_fit": eligible_count >= SHADOW_FIT_MIN_EVENTS,
         "ready_for_loeo": eligible_count >= SHADOW_LOEO_MIN_EVENTS,
+        "ready_for_risk_on_loeo": eligible_count >= RISK_ON_LOEO_MIN_EVENTS,
         "ready_for_activation_review": eligible_count >= ACTIVATION_REVIEW_MIN_EVENTS,
         "competition": LEAGUE_COMPETITION,
         "live_correction_active": False,
@@ -957,8 +1087,9 @@ def main():
         "interpretation_policy": {
             "inventory": "demand_proxy_not_confirmed_sales",
             "pre_calibration": "show_raw_trajectory_and_historical_error_only",
-            "forward_live_fit": "from three completed league events, fit simple event-balanced candidates and allow only a guarded 20% production blend",
-            "loeo_validation": "from five events, validate by holding out complete events rather than individual horizon rows",
+            "forward_live_fit": "from three completed league events, fit simple event-balanced candidates with a guarded 20% base production blend",
+            "risk_on_loeo": "from three events, run early LOEO with two training events per fold; if it passes and live readiness is 24h_ready, allow a 35% risk-on blend",
+            "loeo_validation": "from five events, run the formal validation by holding out complete events rather than individual horizon rows",
             "full_production_activation": "disabled; activation review requires a higher event gate and event-level out-of-sample improvement",
         },
     }

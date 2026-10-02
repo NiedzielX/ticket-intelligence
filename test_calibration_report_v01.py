@@ -135,6 +135,23 @@ def test_live_candidate_fit_starts_at_three_events():
     )
 
 
+def test_risk_on_loeo_starts_at_three_events():
+    rows = make_linear_shadow_rows(3)
+    result = report.risk_on_loeo_candidate(rows, "available_index_linear")
+
+    assert_equal(result["status"], "ready", "Three events enable risk-on LOEO")
+    assert_equal(result["event_count"], 3, "Three complete held-out folds")
+    assert_equal(result["minimum_training_events"], 2, "Each fold trains on two events")
+    assert_equal(result["improved_event_count"], 3, "Synthetic candidate improves all folds")
+    assert_equal(result["worsened_event_count"], 0, "Synthetic candidate worsens no folds")
+    assert_equal(result["passes_risk_on_guardrails"], True, "Risk-on guardrails pass")
+    assert_equal(
+        {row["fold_training_event_count"] for row in result["predictions"]},
+        {2},
+        "Every early LOEO fold trains on the other two events",
+    )
+
+
 def test_loeo_starts_at_five_events_and_holds_out_whole_events():
     rows = make_linear_shadow_rows(5)
     shadow = report.build_shadow_candidates(rows, eligible_event_count=5)
@@ -246,6 +263,7 @@ def test_markdown_exposes_staged_gates():
 def main():
     test_basic_reports()
     test_live_candidate_fit_starts_at_three_events()
+    test_risk_on_loeo_starts_at_three_events()
     test_loeo_starts_at_five_events_and_holds_out_whole_events()
     test_activation_review_never_enables_production()
     test_shadow_adjustment_cap()
