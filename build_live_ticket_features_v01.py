@@ -78,6 +78,16 @@ def parse_timestamp(value):
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def aggregate_columns_missing(exc):
+    message = str(exc).lower()
+    return (
+        "available_total" in message
+        or "sector_count" in message
+        or "schema cache" in message
+        or "pgrst204" in message
+    )
+
+
 def load_snapshot_context(ticket_event_id):
     event_query = parse.urlencode(
         {
@@ -92,31 +102,34 @@ def load_snapshot_context(ticket_event_id):
         )
     event = event_rows[0]
 
-    snapshot_select = (
+    snapshot_base_select = (
         "id,captured_at,ticket_event_id,"
         "event_match_date_at_capture,event_kickoff_at_capture"
     )
-    common = {
-        "ticket_event_id": f"eq.{ticket_event_id}",
-        "select": snapshot_select,
-    }
+    snapshot_select = snapshot_base_select + ",available_total,sector_count"
+    aggregate_columns_available = True
 
-    first_query = parse.urlencode(
-        {
-            **common,
-            "order": "captured_at.asc",
-            "limit": "1",
+    def snapshot_query(order, limit=None, captured_at_filter=None):
+        params = {
+            "ticket_event_id": f"eq.{ticket_event_id}",
+            "select": snapshot_select if aggregate_columns_available else snapshot_base_select,
+            "order": order,
         }
-    )
-    latest_query = parse.urlencode(
-        {
-            **common,
-            "order": "captured_at.desc",
-            "limit": "1",
-        }
-    )
-    first_rows = api_get_all(f"snapshots?{first_query}")
-    latest_rows = api_get_all(f"snapshots?{latest_query}")
+        if limit is not None:
+            params["limit"] = str(limit)
+        if captured_at_filter is not None:
+            params["captured_at"] = captured_at_filter
+        return api_get_all(f"snapshots?{parse.urlencode(params)}")
+
+    try:
+        first_rows = snapshot_query("captured_at.asc", limit=1)
+        latest_rows = snapshot_query("captured_at.desc", limit=1)
+    except RuntimeError as exc:
+        if not aggregate_columns_missing(exc):
+            raise
+        aggregate_columns_available = False
+        first_rows = snapshot_query("captured_at.asc", limit=1)
+        latest_rows = snapshot_query("captured_at.desc", limit=1)
 
     if not latest_rows:
         return []
@@ -126,14 +139,10 @@ def load_snapshot_context(ticket_event_id):
         return []
 
     cutoff = latest_at - timedelta(hours=LIVE_FEATURE_LOOKBACK_HOURS)
-    recent_query = parse.urlencode(
-        {
-            **common,
-            "captured_at": f"gte.{cutoff.isoformat()}",
-            "order": "captured_at.asc",
-        }
+    recent_rows = snapshot_query(
+        "captured_at.asc",
+        captured_at_filter=f"gte.{cutoff.isoformat()}",
     )
-    recent_rows = api_get_all(f"snapshots?{recent_query}")
 
     # Egress containment: never download the full snapshot history. Keep one
     # full-event baseline plus only the recent window needed for live features.
@@ -175,6 +184,9 @@ def load_snapshot_context(ticket_event_id):
                 "kickoff_at": kickoff_value,
                 "hours_to_kickoff": hours_to_kickoff,
                 "days_to_match": days_to_match,
+                "available_total": snapshot.get("available_total"),
+                "sector_count": snapshot.get("sector_count"),
+                "snapshot_aggregates_available": aggregate_columns_available,
             }
         )
 
@@ -261,8 +273,9 @@ def round_or_none(value, digits=4):
     return None if value is None else round(value, digits)
 
 
-def build_records(context_rows, totals, sector_counts):
+def build_records(context_rows, totals, sector_counts, aggregate_ids=None):
     records = []
+    aggregate_ids = set(aggregate_ids or [])
 
     for row in context_rows:
         snapshot_id = int(row["snapshot_id"])
@@ -278,6 +291,11 @@ def build_records(context_rows, totals, sector_counts):
                 "_captured_at": captured_at,
                 "available_total": totals[snapshot_id],
                 "sector_count": sector_counts.get(snapshot_id, 0),
+                "_inventory_source": (
+                    "snapshot_aggregate"
+                    if snapshot_id in aggregate_ids
+                    else "sector_inventory_fallback"
+                ),
             }
         )
 
@@ -292,9 +310,37 @@ def build_records(context_rows, totals, sector_counts):
 def load_feature_records(ticket_event_id):
     context_rows = load_snapshot_context(ticket_event_id)
     snapshot_ids = select_inventory_snapshot_ids(context_rows)
-    inventory_rows = load_inventory(snapshot_ids)
-    totals, sector_counts = aggregate_available(inventory_rows)
-    raw_records = build_records(context_rows, totals, sector_counts)
+    selected_ids = set(snapshot_ids)
+
+    totals = {}
+    sector_counts = {}
+    aggregate_ids = set()
+
+    for row in context_rows:
+        snapshot_id = int(row["snapshot_id"])
+        if snapshot_id not in selected_ids:
+            continue
+        available_total = row.get("available_total")
+        sector_count = row.get("sector_count")
+        if available_total is None or sector_count is None:
+            continue
+        totals[snapshot_id] = int(available_total)
+        sector_counts[snapshot_id] = int(sector_count)
+        aggregate_ids.add(snapshot_id)
+
+    missing_ids = sorted(selected_ids - aggregate_ids)
+    if missing_ids:
+        inventory_rows = load_inventory(missing_ids)
+        fallback_totals, fallback_counts = aggregate_available(inventory_rows)
+        totals.update(fallback_totals)
+        sector_counts.update(fallback_counts)
+
+    raw_records = build_records(
+        context_rows,
+        totals,
+        sector_counts,
+        aggregate_ids=aggregate_ids,
+    )
     return context_rows, snapshot_ids, raw_records
 
 
@@ -616,7 +662,17 @@ def main():
         f"{ticket_event['home_team']} vs {ticket_event['away_team']}"
     )
     print(f"Snapshot context rows loaded: {len(context_rows)}")
-    print(f"Inventory snapshots loaded: {len(snapshot_ids)}")
+    aggregate_records = sum(
+        record.get("_inventory_source") == "snapshot_aggregate"
+        for record in raw_records
+    )
+    fallback_records = sum(
+        record.get("_inventory_source") == "sector_inventory_fallback"
+        for record in raw_records
+    )
+    print(f"Inventory snapshots selected: {len(snapshot_ids)}")
+    print(f"Snapshot aggregates used: {aggregate_records}")
+    print(f"Sector inventory fallbacks: {fallback_records}")
     print(f"Feature snapshots: {len(features)}")
     print(f"Excluded transient spikes: {len(anomaly_rows)}")
     print(f"Latest hours to kickoff: {latest['hours_to_kickoff']}")

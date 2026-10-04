@@ -15,6 +15,7 @@ on:
       - build_calibration_report_v01.py
       - evaluate_forecast_horizons_v01.py
       - persist_forecast_observation_v01.py
+      - sql/snapshot_inventory_aggregates_v01.sql
       - .github/workflows/beyond-forecast-v01.yml
 
 permissions:
