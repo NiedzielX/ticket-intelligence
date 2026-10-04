@@ -28,7 +28,7 @@ on:
       - test_calibration_report_v01.py
       - .github/workflows/sync-league-attendance-outcomes-v01.yml
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "17 */12 * * *"
 
 permissions:
   contents: read
