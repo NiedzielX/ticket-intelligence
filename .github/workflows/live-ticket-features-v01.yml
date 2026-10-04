@@ -8,6 +8,7 @@ on:
     paths:
       - build_live_ticket_features_v01.py
       - test_live_ticket_features_v01.py
+      - sql/snapshot_inventory_aggregates_v01.sql
       - .github/workflows/live-ticket-features-v01.yml
 
 permissions:
