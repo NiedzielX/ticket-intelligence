@@ -19,7 +19,7 @@ on:
       - build_active_ticket_event_matrix_v01.py
       - .github/workflows/live-forecast-monitor-v01.yml
   schedule:
-    - cron: "37 * * * *"
+    - cron: "37 */6 * * *"
 
 concurrency:
   group: live-forecast-monitor-v01
