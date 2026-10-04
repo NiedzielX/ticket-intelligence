@@ -260,8 +260,9 @@ def test_target_and_future_events_are_excluded_from_training():
         forecast.evaluation_v01.load_outcomes = lambda ticket_event_id=None: outcomes
         forecast.evaluation_v01.load_events = lambda ids: events
 
-        def fake_observations(ids):
+        def fake_observations(ids, include_payload=True):
             captured["observation_ids"] = list(ids)
+            captured["include_payload"] = include_payload
             return []
 
         def fake_evaluations(prior_events, prior_outcomes, observations):
@@ -292,6 +293,7 @@ def test_target_and_future_events_are_excluded_from_training():
     assert_equal(ids, [1, 2, 3], "Only prior events may train target correction")
     assert_equal(captured["event_ids"], [1, 2, 3], "Target/future events excluded before evaluation")
     assert_equal(captured["observation_ids"], [1, 2, 3], "Only prior observations loaded")
+    assert_equal(captured["include_payload"], False, "Calibration reads exclude payload blobs")
     assert_equal(len(rows), 3, "Three leakage-safe training event rows")
 
 
