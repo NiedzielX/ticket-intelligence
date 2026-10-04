@@ -393,7 +393,7 @@ def prior_live_correction_rows(event):
         for row in outcomes
         if int(row["ticket_event_id"]) in prior_set
     ]
-    observations = evaluation_v01.load_observations(prior_event_ids)
+    observations = evaluation_v01.load_observations(prior_event_ids, include_payload=False)
     evaluation_rows, _ = evaluation_v01.build_evaluations(
         prior_events,
         prior_outcomes,
