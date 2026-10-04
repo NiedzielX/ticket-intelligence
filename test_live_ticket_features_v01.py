@@ -190,6 +190,61 @@ def test_snapshot_context_downloads_first_plus_recent_only():
     assert any("captured_at=gte." in path for path in snapshot_calls)
 
 
+def test_snapshot_context_falls_back_before_aggregate_migration():
+    event = {
+        "id": 1,
+        "provider": "roboticket",
+        "external_event_id": "10069",
+        "home_team": "Lech Poznań",
+        "away_team": "Jagiellonia Białystok",
+        "competition": "Ekstraklasa",
+        "match_date": "2026-08-04",
+        "kickoff_at": "2026-08-04T18:00:00+00:00",
+    }
+    first = {
+        "id": 1,
+        "captured_at": "2026-08-01T00:00:00+00:00",
+        "ticket_event_id": 1,
+        "event_match_date_at_capture": "2026-08-04",
+        "event_kickoff_at_capture": "2026-08-04T18:00:00+00:00",
+    }
+    latest = {
+        "id": 4,
+        "captured_at": "2026-08-03T18:00:00+00:00",
+        "ticket_event_id": 1,
+        "event_match_date_at_capture": "2026-08-04",
+        "event_kickoff_at_capture": "2026-08-04T18:00:00+00:00",
+    }
+    calls = []
+    original_api = live.api_get_all
+    try:
+        def fake_api(path):
+            calls.append(path)
+            if path.startswith("ticket_events?"):
+                return [event]
+            if "available_total" in path:
+                raise RuntimeError(
+                    'Supabase 400: PGRST204 Could not find the available_total column'
+                )
+            if "order=captured_at.asc" in path and "limit=1" in path:
+                return [first]
+            if "order=captured_at.desc" in path and "limit=1" in path:
+                return [latest]
+            if "captured_at=gte." in path:
+                return [latest]
+            raise AssertionError(f"Unexpected query: {path}")
+
+        live.api_get_all = fake_api
+        context = live.load_snapshot_context(1)
+    finally:
+        live.api_get_all = original_api
+
+    assert [row["snapshot_id"] for row in context] == [1, 4]
+    assert all(row["available_total"] is None for row in context)
+    assert all(row["snapshot_aggregates_available"] is False for row in context)
+    assert any("available_total" in path for path in calls)
+
+
 def test_bounded_history_preserves_latest_live_features():
     records = [record(hour + 1, hour, 20000 - 50 * hour) for hour in range(73)]
     full_latest = live.calculate_features(records)[-1]
@@ -243,14 +298,50 @@ def test_transient_spike_detection_does_not_cross_bounded_history_gap():
     assert len(anomalies) == 1
 
 
-def test_feature_loader_uses_bounded_inventory_selection():
+def test_feature_loader_uses_snapshot_aggregates_without_sector_read():
     context = [record(hour + 1, hour, 20000 - 50 * hour) for hour in range(73)]
+    loaded_ids = []
+
+    original_context_loader = live.load_snapshot_context
+    original_inventory_loader = live.load_inventory
+    try:
+        live.load_snapshot_context = lambda ticket_event_id: context
+
+        def fail_if_inventory_loaded(snapshot_ids):
+            loaded_ids.extend(snapshot_ids)
+            raise AssertionError("sector_inventory should not be read when snapshot aggregates exist")
+
+        live.load_inventory = fail_if_inventory_loaded
+        loaded_context, snapshot_ids, raw_records = live.load_feature_records(1)
+    finally:
+        live.load_snapshot_context = original_context_loader
+        live.load_inventory = original_inventory_loader
+
+    expected_ids = live.select_inventory_snapshot_ids(context)
+    assert loaded_context == context
+    assert snapshot_ids == expected_ids
+    assert loaded_ids == []
+    assert [row["snapshot_id"] for row in raw_records] == expected_ids
+    assert {
+        row["_inventory_source"] for row in raw_records
+    } == {"snapshot_aggregate"}
+
+
+def test_feature_loader_falls_back_only_for_missing_aggregates():
+    context = [record(hour + 1, hour, 20000 - 50 * hour) for hour in range(73)]
+    expected_ids = live.select_inventory_snapshot_ids(context)
+    missing_id = expected_ids[-2]
     available_by_id = {
         row["snapshot_id"]: row["available_total"]
         for row in context
     }
-    loaded_ids = []
 
+    for row in context:
+        if row["snapshot_id"] == missing_id:
+            row["available_total"] = None
+            row["sector_count"] = None
+
+    loaded_ids = []
     original_context_loader = live.load_snapshot_context
     original_inventory_loader = live.load_inventory
     try:
@@ -268,16 +359,23 @@ def test_feature_loader_uses_bounded_inventory_selection():
             ]
 
         live.load_inventory = fake_load_inventory
-        loaded_context, snapshot_ids, raw_records = live.load_feature_records(1)
+        _, snapshot_ids, raw_records = live.load_feature_records(1)
     finally:
         live.load_snapshot_context = original_context_loader
         live.load_inventory = original_inventory_loader
 
-    expected_ids = live.select_inventory_snapshot_ids(context)
-    assert loaded_context == context
     assert snapshot_ids == expected_ids
-    assert loaded_ids == expected_ids
-    assert [row["snapshot_id"] for row in raw_records] == expected_ids
+    assert loaded_ids == [missing_id]
+    sources = {
+        row["snapshot_id"]: row["_inventory_source"]
+        for row in raw_records
+    }
+    assert sources[missing_id] == "sector_inventory_fallback"
+    assert all(
+        source == "snapshot_aggregate"
+        for snapshot_id, source in sources.items()
+        if snapshot_id != missing_id
+    )
 
 def main():
     test_contiguous_history_is_ready()
@@ -287,9 +385,11 @@ def main():
     test_bounded_inventory_selection_keeps_first_and_recent_window()
     test_five_minute_inventory_is_downsampled_to_thirty_minutes()
     test_snapshot_context_downloads_first_plus_recent_only()
+    test_snapshot_context_falls_back_before_aggregate_migration()
     test_bounded_history_preserves_latest_live_features()
     test_transient_spike_detection_does_not_cross_bounded_history_gap()
-    test_feature_loader_uses_bounded_inventory_selection()
+    test_feature_loader_uses_snapshot_aggregates_without_sector_read()
+    test_feature_loader_falls_back_only_for_missing_aggregates()
     print("SUCCESS")
 
 
