@@ -35,6 +35,7 @@ LIVE_PRODUCTION_MAX_ADJUSTMENT_RATIO = float(
 BASE = Path("lech_demand_artifacts_v1/lech_demand_dataset_v1.csv")
 SOURCE = Path("lech_demand_artifacts_v1/POL_source.csv")
 OUT = Path(os.getenv("OUTPUT_DIR", "beyond_forecast_artifacts_v01"))
+LIVE_FEATURE_DIR = Path(os.getenv("LIVE_FEATURE_DIR", "live_ticket_artifacts_v01"))
 CATEGORICAL = model_v13.CATEGORICAL
 NUMERIC = model_v13.CANDIDATES["early_seasonality"]["numeric"]
 FEATURES = CATEGORICAL + NUMERIC
@@ -322,10 +323,17 @@ def historical_forecast(event):
 
 
 def live_signal(event):
-    context, snapshot_ids, raw = live_v01.load_feature_records(event["id"])
-    excluded, anomalies = live_v01.detect_transient_spikes(raw)
-    clean = [r for r in raw if r["snapshot_id"] not in excluded]
-    latest = live_v01.calculate_features(clean)[-1]
+    feature_path = LIVE_FEATURE_DIR / (
+        f"event_{event['external_event_id']}_latest_live_ticket_features_v01.json"
+    )
+    if not feature_path.exists():
+        raise RuntimeError(
+            f"Missing prebuilt live feature payload: {feature_path}. "
+            "Build live ticket features before running the forecast."
+        )
+
+    payload = json.loads(feature_path.read_text(encoding="utf-8"))
+    latest = payload.get("latest") or {}
     keys = [
         "snapshot_id", "captured_at", "hours_to_kickoff", "days_to_match",
         "signal_readiness", "data_gap_detected", "history_hours", "sector_count", "available_total",
@@ -336,11 +344,12 @@ def live_signal(event):
     ]
     return {
         **{k: latest.get(k) for k in keys},
-        "raw_snapshot_count": len(context),
-        "inventory_snapshot_count": len(snapshot_ids),
-        "clean_snapshot_count": len(clean),
-        "excluded_anomaly_count": len(anomalies),
+        "raw_snapshot_count": payload.get("raw_snapshot_count"),
+        "inventory_snapshot_count": payload.get("inventory_snapshot_count"),
+        "clean_snapshot_count": payload.get("feature_snapshot_count"),
+        "excluded_anomaly_count": payload.get("excluded_anomaly_count"),
         "inventory_interpretation": "demand_proxy_not_confirmed_sales",
+        "feature_source": "prebuilt_live_feature_payload",
     }
 
 
