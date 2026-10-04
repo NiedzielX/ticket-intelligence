@@ -26,6 +26,7 @@ on:
       - test_beyond_live_correction_v01.py
       - test_live_forecast_monitor_v01.py
       - sql/snapshot_event_context_v01.sql
+      - sql/snapshot_inventory_aggregates_v01.sql
       - .github/workflows/collect-lech.yml
   push:
     branches:
@@ -47,6 +48,7 @@ on:
       - test_live_ticket_features_v01.py
       - test_forecast_live_quality_v01.py
       - sql/snapshot_event_context_v01.sql
+      - sql/snapshot_inventory_aggregates_v01.sql
       - .github/workflows/collect-lech.yml
   schedule:
     - cron: "7 */6 * * *"
@@ -154,6 +156,37 @@ jobs:
                   f'Apply sql/snapshot_event_context_v01.sql before enabling auto-onboarding. '
                   f'Supabase HTTP {exc.code}: {detail}'
               ) from exc
+          PY
+
+      - name: Check snapshot aggregate migration
+        run: |
+          python - <<'PY'
+          import os
+          from urllib import error, request
+
+          url = (
+              os.environ['SUPABASE_URL'].rstrip('/')
+              + '/rest/v1/snapshots?select=available_total,sector_count&limit=1'
+          )
+          key = os.environ['SUPABASE_SECRET_KEY']
+          req = request.Request(url, headers={
+              'apikey': key,
+              'Authorization': f'Bearer {key}',
+              'Accept': 'application/json',
+          })
+          try:
+              with request.urlopen(req, timeout=30) as response:
+                  print(
+                      'snapshot inventory aggregates: ACTIVE '
+                      f'(HTTP {response.status}); sector_inventory fallback should be zero after backfill.'
+                  )
+          except error.HTTPError as exc:
+              detail = exc.read().decode('utf-8', errors='replace')
+              print(
+                  '::warning::Snapshot inventory aggregate migration is not active yet. '
+                  'Apply sql/snapshot_inventory_aggregates_v01.sql. '
+                  f'Fallback remains enabled. Supabase HTTP {exc.code}: {detail}'
+              )
           PY
 
       - name: Install dependencies
