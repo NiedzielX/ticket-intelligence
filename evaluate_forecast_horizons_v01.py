@@ -99,24 +99,28 @@ def load_events(ticket_event_ids):
     return {int(row["id"]): row for row in api_get_all(f"ticket_events?{params}")}
 
 
-def load_observations(ticket_event_ids):
+def load_observations(ticket_event_ids, include_payload=True):
     if not ticket_event_ids:
         return []
     ids = ",".join(str(value) for value in sorted(set(ticket_event_ids)))
+    select_fields = (
+        "id,ticket_event_id,source_snapshot_id,forecast_generated_at,"
+        "source_snapshot_captured_at,hours_to_kickoff,horizon,model_version,"
+        "historical_model,historical_p10,historical_p50,historical_p90,"
+        "live_adjustment,final_p10,final_p50,final_p90,forecast_status,correction_status,"
+        "signal_readiness,live_available_total,live_first_available_total,"
+        "live_available_index,live_net_removed_since_first,"
+        "live_net_removed_since_previous,live_velocity_since_previous,"
+        "live_net_removed_6h,live_velocity_6h,live_net_removed_24h,"
+        "live_velocity_24h,live_acceleration_6h_vs_24h"
+    )
+    if include_payload:
+        select_fields += ",payload"
+
     params = parse.urlencode(
         {
             "ticket_event_id": f"in.({ids})",
-            "select": (
-                "id,ticket_event_id,source_snapshot_id,forecast_generated_at,"
-                "source_snapshot_captured_at,hours_to_kickoff,horizon,model_version,"
-                "historical_model,historical_p10,historical_p50,historical_p90,"
-                "live_adjustment,final_p10,final_p50,final_p90,forecast_status,correction_status,payload,"
-                "signal_readiness,live_available_total,live_first_available_total,"
-                "live_available_index,live_net_removed_since_first,"
-                "live_net_removed_since_previous,live_velocity_since_previous,"
-                "live_net_removed_6h,live_velocity_6h,live_net_removed_24h,"
-                "live_velocity_24h,live_acceleration_6h_vs_24h"
-            ),
+            "select": select_fields,
             "order": "hours_to_kickoff.desc",
         }
     )
