@@ -545,7 +545,7 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
-def write_outputs(ticket_event, raw_snapshot_count, features, anomaly_rows):
+def write_outputs(ticket_event, raw_snapshot_count, inventory_snapshot_count, features, anomaly_rows):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     csv_path = OUTPUT_DIR / f"event_{EVENT_ID}_live_ticket_features_v01.csv"
@@ -558,6 +558,7 @@ def write_outputs(ticket_event, raw_snapshot_count, features, anomaly_rows):
     payload = {
         "event": ticket_event,
         "raw_snapshot_count": raw_snapshot_count,
+        "inventory_snapshot_count": inventory_snapshot_count,
         "feature_snapshot_count": len(features),
         "excluded_anomaly_count": len(anomaly_rows),
         "excluded_snapshot_ids": [row["snapshot_id"] for row in anomaly_rows],
@@ -603,6 +604,7 @@ def main():
     csv_path, anomaly_path, latest_path = write_outputs(
         ticket_event,
         len(context_rows),
+        len(snapshot_ids),
         features,
         anomaly_rows,
     )
