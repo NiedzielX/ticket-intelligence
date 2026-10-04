@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
+import json
 import os
+import tempfile
+from pathlib import Path
 
 os.environ.setdefault("SUPABASE_URL", "https://example.invalid")
 os.environ.setdefault("SUPABASE_SECRET_KEY", "test-key")
@@ -185,6 +188,51 @@ def test_data_gap_blocks_available_index_projection():
     assert_equal(projection, None, "Data gap blocks live available-index projection")
 
 
+def test_forecast_reuses_prebuilt_live_features():
+    payload = {
+        "raw_snapshot_count": 63,
+        "inventory_snapshot_count": 62,
+        "feature_snapshot_count": 62,
+        "excluded_anomaly_count": 0,
+        "latest": {
+            "snapshot_id": 123,
+            "captured_at": "2026-10-04T18:00:00+00:00",
+            "hours_to_kickoff": 330.0,
+            "days_to_match": 13.75,
+            "signal_readiness": "24h_ready",
+            "data_gap_detected": False,
+            "history_hours": 120.0,
+            "sector_count": 40,
+            "available_total": 5000,
+            "first_available_total": 12000,
+            "available_index": 0.416667,
+            "net_removed_since_first": 7000,
+            "net_removed_since_previous": 20,
+            "inventory_velocity_since_previous": 40.0,
+            "net_removed_6h": 300,
+            "inventory_velocity_6h": 50.0,
+            "net_removed_24h": 900,
+            "inventory_velocity_24h": 37.5,
+            "inventory_acceleration_6h_vs_24h": 12.5,
+        },
+    }
+    original_dir = forecast.LIVE_FEATURE_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            forecast.LIVE_FEATURE_DIR = Path(tmp)
+            path = forecast.LIVE_FEATURE_DIR / "event_10597_latest_live_ticket_features_v01.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            signal = forecast.live_signal({"external_event_id": "10597"})
+        finally:
+            forecast.LIVE_FEATURE_DIR = original_dir
+
+    assert_equal(signal["snapshot_id"], 123, "Prebuilt feature snapshot")
+    assert_equal(signal["inventory_snapshot_count"], 62, "Prebuilt inventory read count")
+    assert_equal(signal["feature_source"], "prebuilt_live_feature_payload", "Feature source")
+    assert_equal(signal["available_index"], 0.416667, "Available index")
+
+
 def test_target_and_future_events_are_excluded_from_training():
     target = {
         "id": 4,
@@ -212,8 +260,9 @@ def test_target_and_future_events_are_excluded_from_training():
         forecast.evaluation_v01.load_outcomes = lambda ticket_event_id=None: outcomes
         forecast.evaluation_v01.load_events = lambda ids: events
 
-        def fake_observations(ids):
+        def fake_observations(ids, include_payload=True):
             captured["observation_ids"] = list(ids)
+            captured["include_payload"] = include_payload
             return []
 
         def fake_evaluations(prior_events, prior_outcomes, observations):
@@ -244,6 +293,7 @@ def test_target_and_future_events_are_excluded_from_training():
     assert_equal(ids, [1, 2, 3], "Only prior events may train target correction")
     assert_equal(captured["event_ids"], [1, 2, 3], "Target/future events excluded before evaluation")
     assert_equal(captured["observation_ids"], [1, 2, 3], "Only prior observations loaded")
+    assert_equal(captured["include_payload"], False, "Calibration reads exclude payload blobs")
     assert_equal(len(rows), 3, "Three leakage-safe training event rows")
 
 
@@ -252,6 +302,7 @@ def main():
     test_risk_on_requires_24h_readiness()
     test_two_events_keep_historical_forecast()
     test_data_gap_blocks_available_index_projection()
+    test_forecast_reuses_prebuilt_live_features()
     test_target_and_future_events_are_excluded_from_training()
     print("SUCCESS")
 

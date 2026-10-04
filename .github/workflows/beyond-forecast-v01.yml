@@ -9,6 +9,8 @@ on:
       - enrich_forecast_live_quality_v01.py
       - test_forecast_live_quality_v01.py
       - test_beyond_live_correction_v01.py
+      - build_live_ticket_features_v01.py
+      - test_live_ticket_features_v01.py
       - build_beyond_forecast_v01.py
       - build_calibration_report_v01.py
       - evaluate_forecast_horizons_v01.py
@@ -109,6 +111,8 @@ jobs:
       TRANSIENT_RETURN_TOLERANCE: "100"
       SNAPSHOT_GAP_THRESHOLD_HOURS: "2.5"
       WINDOW_MAX_OVERSHOOT_HOURS: "2.5"
+      LIVE_FEATURE_LOOKBACK_HOURS: "30"
+      LIVE_FEATURE_SAMPLE_MINUTES: "30"
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
 
@@ -129,6 +133,9 @@ jobs:
       - name: Build leakage-safe historical dataset
         if: matrix.event.competition == 'Ekstraklasa'
         run: python build_lech_demand_dataset_v11.py
+
+      - name: Build bounded live ticket features
+        run: python build_live_ticket_features_v01.py
 
       - name: Build Beyond Forecast
         run: python build_beyond_forecast_v01.py

@@ -20,6 +20,7 @@ TRANSIENT_RETURN_TOLERANCE = int(os.getenv("TRANSIENT_RETURN_TOLERANCE", "100"))
 SNAPSHOT_GAP_THRESHOLD_HOURS = float(os.getenv("SNAPSHOT_GAP_THRESHOLD_HOURS", "2.5"))
 WINDOW_MAX_OVERSHOOT_HOURS = float(os.getenv("WINDOW_MAX_OVERSHOOT_HOURS", "2.5"))
 LIVE_FEATURE_LOOKBACK_HOURS = float(os.getenv("LIVE_FEATURE_LOOKBACK_HOURS", "30"))
+LIVE_FEATURE_SAMPLE_MINUTES = float(os.getenv("LIVE_FEATURE_SAMPLE_MINUTES", "30"))
 
 
 def api_get_all(path):
@@ -91,19 +92,60 @@ def load_snapshot_context(ticket_event_id):
         )
     event = event_rows[0]
 
-    snapshot_query = parse.urlencode(
+    snapshot_select = (
+        "id,captured_at,ticket_event_id,"
+        "event_match_date_at_capture,event_kickoff_at_capture"
+    )
+    common = {
+        "ticket_event_id": f"eq.{ticket_event_id}",
+        "select": snapshot_select,
+    }
+
+    first_query = parse.urlencode(
         {
-            "ticket_event_id": f"eq.{ticket_event_id}",
-            "select": (
-                "id,captured_at,ticket_event_id,"
-                "event_match_date_at_capture,event_kickoff_at_capture"
-            ),
+            **common,
+            "order": "captured_at.asc",
+            "limit": "1",
+        }
+    )
+    latest_query = parse.urlencode(
+        {
+            **common,
+            "order": "captured_at.desc",
+            "limit": "1",
+        }
+    )
+    first_rows = api_get_all(f"snapshots?{first_query}")
+    latest_rows = api_get_all(f"snapshots?{latest_query}")
+
+    if not latest_rows:
+        return []
+
+    latest_at = parse_timestamp(latest_rows[0].get("captured_at"))
+    if latest_at is None:
+        return []
+
+    cutoff = latest_at - timedelta(hours=LIVE_FEATURE_LOOKBACK_HOURS)
+    recent_query = parse.urlencode(
+        {
+            **common,
+            "captured_at": f"gte.{cutoff.isoformat()}",
             "order": "captured_at.asc",
         }
     )
-    snapshots = api_get_all(f"snapshots?{snapshot_query}")
-    context = []
+    recent_rows = api_get_all(f"snapshots?{recent_query}")
 
+    # Egress containment: never download the full snapshot history. Keep one
+    # full-event baseline plus only the recent window needed for live features.
+    snapshots_by_id = {}
+    for snapshot in first_rows + recent_rows:
+        snapshots_by_id[int(snapshot["id"])] = snapshot
+    snapshots = sorted(
+        snapshots_by_id.values(),
+        key=lambda row: parse_timestamp(row.get("captured_at")) or datetime.min.replace(tzinfo=latest_at.tzinfo),
+    )
+
+    context = []
     for snapshot in snapshots:
         captured_at = parse_timestamp(snapshot.get("captured_at"))
         kickoff_value = snapshot.get("event_kickoff_at_capture") or event.get("kickoff_at")
@@ -139,7 +181,11 @@ def load_snapshot_context(ticket_event_id):
     return context
 
 
-def select_inventory_snapshot_ids(context_rows, lookback_hours=LIVE_FEATURE_LOOKBACK_HOURS):
+def select_inventory_snapshot_ids(
+    context_rows,
+    lookback_hours=LIVE_FEATURE_LOOKBACK_HOURS,
+    sample_minutes=LIVE_FEATURE_SAMPLE_MINUTES,
+):
     valid = [
         row
         for row in context_rows
@@ -149,18 +195,31 @@ def select_inventory_snapshot_ids(context_rows, lookback_hours=LIVE_FEATURE_LOOK
         return []
 
     valid.sort(key=lambda row: parse_timestamp(row["captured_at"]))
-    latest_at = parse_timestamp(valid[-1]["captured_at"])
+    first = valid[0]
+    latest = valid[-1]
+    latest_at = parse_timestamp(latest["captured_at"])
     cutoff = latest_at - timedelta(hours=lookback_hours)
-
-    selected = {
-        int(row["snapshot_id"])
-        for row in valid
+    recent = [
+        row for row in valid
         if parse_timestamp(row["captured_at"]) >= cutoff
-    }
+    ]
 
-    # Keep the first observation as the full-event demand baseline while bounding
-    # rolling-window inventory reads to the recent lookback.
-    selected.add(int(valid[0]["snapshot_id"]))
+    selected = {int(first["snapshot_id"]), int(latest["snapshot_id"])}
+
+    if sample_minutes <= 0:
+        selected.update(int(row["snapshot_id"]) for row in recent)
+        return sorted(selected)
+
+    minimum_spacing = timedelta(minutes=sample_minutes)
+    anchor_time = latest_at
+    for row in reversed(recent[:-1]):
+        captured_at = parse_timestamp(row["captured_at"])
+        if anchor_time - captured_at >= minimum_spacing:
+            selected.add(int(row["snapshot_id"]))
+            anchor_time = captured_at
+
+    # The first observation remains the full-event baseline. Recent inventory
+    # is intentionally downsampled before reading sector rows from Supabase.
     return sorted(selected)
 
 
@@ -486,7 +545,7 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
-def write_outputs(ticket_event, raw_snapshot_count, features, anomaly_rows):
+def write_outputs(ticket_event, raw_snapshot_count, inventory_snapshot_count, features, anomaly_rows):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     csv_path = OUTPUT_DIR / f"event_{EVENT_ID}_live_ticket_features_v01.csv"
@@ -499,6 +558,7 @@ def write_outputs(ticket_event, raw_snapshot_count, features, anomaly_rows):
     payload = {
         "event": ticket_event,
         "raw_snapshot_count": raw_snapshot_count,
+        "inventory_snapshot_count": inventory_snapshot_count,
         "feature_snapshot_count": len(features),
         "excluded_anomaly_count": len(anomaly_rows),
         "excluded_snapshot_ids": [row["snapshot_id"] for row in anomaly_rows],
@@ -544,6 +604,7 @@ def main():
     csv_path, anomaly_path, latest_path = write_outputs(
         ticket_event,
         len(context_rows),
+        len(snapshot_ids),
         features,
         anomaly_rows,
     )
@@ -554,7 +615,7 @@ def main():
         f"Event {EVENT_PROVIDER}:{EVENT_ID} — "
         f"{ticket_event['home_team']} vs {ticket_event['away_team']}"
     )
-    print(f"Raw linked snapshots: {len(context_rows)}")
+    print(f"Snapshot context rows loaded: {len(context_rows)}")
     print(f"Inventory snapshots loaded: {len(snapshot_ids)}")
     print(f"Feature snapshots: {len(features)}")
     print(f"Excluded transient spikes: {len(anomaly_rows)}")
