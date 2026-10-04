@@ -8,6 +8,8 @@ os.environ.setdefault("SUPABASE_SECRET_KEY", "test-key")
 os.environ.setdefault("EVENT_ID", "1")
 os.environ.setdefault("SNAPSHOT_GAP_THRESHOLD_HOURS", "2.5")
 os.environ.setdefault("WINDOW_MAX_OVERSHOOT_HOURS", "2.5")
+os.environ.setdefault("LIVE_FEATURE_LOOKBACK_HOURS", "30")
+os.environ.setdefault("LIVE_FEATURE_SAMPLE_MINUTES", "30")
 
 import build_live_ticket_features_v01 as live
 
@@ -101,6 +103,91 @@ def test_bounded_inventory_selection_keeps_first_and_recent_window():
     assert 42 not in selected
     assert 73 in selected
     assert len(selected) == 32
+
+
+def test_five_minute_inventory_is_downsampled_to_thirty_minutes():
+    records = [
+        record(index + 1, index / 12.0, 25000 - index)
+        for index in range(72 * 12 + 1)
+    ]
+    selected = live.select_inventory_snapshot_ids(
+        records,
+        lookback_hours=30,
+        sample_minutes=30,
+    )
+
+    # 30 hours / 30 minutes = 60 intervals, plus latest endpoint and
+    # the full-event first baseline outside the recent window.
+    assert len(selected) == 62
+    assert 1 in selected
+    assert records[-1]["snapshot_id"] in selected
+
+
+def test_snapshot_context_downloads_first_plus_recent_only():
+    event = {
+        "id": 1,
+        "provider": "roboticket",
+        "external_event_id": "10069",
+        "home_team": "Lech Poznań",
+        "away_team": "Jagiellonia Białystok",
+        "competition": "Ekstraklasa",
+        "match_date": "2026-08-04",
+        "kickoff_at": "2026-08-04T18:00:00+00:00",
+    }
+    first = {
+        "id": 1,
+        "captured_at": "2026-08-01T00:00:00+00:00",
+        "ticket_event_id": 1,
+        "event_match_date_at_capture": "2026-08-04",
+        "event_kickoff_at_capture": "2026-08-04T18:00:00+00:00",
+    }
+    old_middle = {
+        "id": 2,
+        "captured_at": "2026-08-02T00:00:00+00:00",
+        "ticket_event_id": 1,
+        "event_match_date_at_capture": "2026-08-04",
+        "event_kickoff_at_capture": "2026-08-04T18:00:00+00:00",
+    }
+    recent = {
+        "id": 3,
+        "captured_at": "2026-08-03T12:00:00+00:00",
+        "ticket_event_id": 1,
+        "event_match_date_at_capture": "2026-08-04",
+        "event_kickoff_at_capture": "2026-08-04T18:00:00+00:00",
+    }
+    latest = {
+        "id": 4,
+        "captured_at": "2026-08-03T18:00:00+00:00",
+        "ticket_event_id": 1,
+        "event_match_date_at_capture": "2026-08-04",
+        "event_kickoff_at_capture": "2026-08-04T18:00:00+00:00",
+    }
+
+    calls = []
+    original_api = live.api_get_all
+    try:
+        def fake_api(path):
+            calls.append(path)
+            if path.startswith("ticket_events?"):
+                return [event]
+            if "order=captured_at.asc" in path and "limit=1" in path:
+                return [first]
+            if "order=captured_at.desc" in path and "limit=1" in path:
+                return [latest]
+            if "captured_at=gte." in path:
+                return [recent, latest]
+            raise AssertionError(f"Unexpected unbounded query: {path}")
+
+        live.api_get_all = fake_api
+        context = live.load_snapshot_context(1)
+    finally:
+        live.api_get_all = original_api
+
+    assert [row["snapshot_id"] for row in context] == [1, 3, 4]
+    assert all(row["snapshot_id"] != old_middle["id"] for row in context)
+    snapshot_calls = [path for path in calls if path.startswith("snapshots?")]
+    assert len(snapshot_calls) == 3
+    assert any("captured_at=gte." in path for path in snapshot_calls)
 
 
 def test_bounded_history_preserves_latest_live_features():
@@ -198,6 +285,8 @@ def main():
     test_oversized_window_is_not_interpolated()
     test_previous_velocity_is_invalid_after_large_gap()
     test_bounded_inventory_selection_keeps_first_and_recent_window()
+    test_five_minute_inventory_is_downsampled_to_thirty_minutes()
+    test_snapshot_context_downloads_first_plus_recent_only()
     test_bounded_history_preserves_latest_live_features()
     test_transient_spike_detection_does_not_cross_bounded_history_gap()
     test_feature_loader_uses_bounded_inventory_selection()
