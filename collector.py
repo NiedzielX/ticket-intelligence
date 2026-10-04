@@ -134,22 +134,57 @@ def resolve_or_create_ticket_event():
     return created[0]
 
 
-def create_snapshot(event_metadata):
-    result = api(
-        "snapshots",
-        "POST",
-        {
-            "event_id": None,
-            "source": EVENT_PROVIDER,
-            "ticket_event_id": event_metadata["id"],
-            "event_match_date_at_capture": event_metadata["match_date"],
-            "event_kickoff_at_capture": event_metadata["kickoff_at"],
-        },
-        "return=representation",
+def aggregate_columns_missing(exc):
+    message = str(exc).lower()
+    return (
+        "available_total" in message
+        or "sector_count" in message
+        or "schema cache" in message
+        or "pgrst204" in message
     )
+
+
+def create_snapshot(event_metadata, total_available, sector_count):
+    payload = {
+        "event_id": None,
+        "source": EVENT_PROVIDER,
+        "ticket_event_id": event_metadata["id"],
+        "event_match_date_at_capture": event_metadata["match_date"],
+        "event_kickoff_at_capture": event_metadata["kickoff_at"],
+        "available_total": int(total_available),
+        "sector_count": int(sector_count),
+    }
+
+    aggregate_persisted = True
+    try:
+        result = api(
+            "snapshots",
+            "POST",
+            payload,
+            "return=representation",
+        )
+    except RuntimeError as exc:
+        if not aggregate_columns_missing(exc):
+            raise
+        aggregate_persisted = False
+        print(
+            "WARNING snapshot aggregate columns are not available yet; "
+            "falling back to legacy snapshot insert. "
+            "Apply sql/snapshot_inventory_aggregates_v01.sql.",
+            flush=True,
+        )
+        payload.pop("available_total", None)
+        payload.pop("sector_count", None)
+        result = api(
+            "snapshots",
+            "POST",
+            payload,
+            "return=representation",
+        )
+
     if not result or len(result) != 1:
         raise RuntimeError("Failed to create snapshot.")
-    return int(result[0]["id"])
+    return int(result[0]["id"]), aggregate_persisted
 
 
 def delete_snapshot(snapshot_id):
@@ -184,7 +219,13 @@ def insert_sector_inventory(snapshot_id, sectors):
     return len(rows)
 
 
-def write_result(event_metadata, snapshot_id, sector_count, total_available):
+def write_result(
+    event_metadata,
+    snapshot_id,
+    sector_count,
+    total_available,
+    snapshot_aggregate_persisted,
+):
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
     path = RESULT_DIR / f"event_{EVENT_ID}_collector_result_v01.json"
     payload = {
@@ -198,6 +239,7 @@ def write_result(event_metadata, snapshot_id, sector_count, total_available):
         "kickoff_at": event_metadata.get("kickoff_at"),
         "sector_count": int(sector_count),
         "available_total": int(total_available),
+        "snapshot_aggregate_persisted": bool(snapshot_aggregate_persisted),
     }
     path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -325,7 +367,12 @@ async def main():
         )
         print("Event kickoff:", event_metadata["kickoff_at"])
 
-        snapshot_id = create_snapshot(event_metadata)
+        total_available = sum(available for _, available in sectors)
+        snapshot_id, snapshot_aggregate_persisted = create_snapshot(
+            event_metadata,
+            total_available,
+            len(sectors),
+        )
         try:
             inserted = insert_sector_inventory(snapshot_id, sectors)
         except Exception:
@@ -339,18 +386,19 @@ async def main():
                 )
             raise
 
-        total_available = sum(available for _, available in sectors)
         result_path = write_result(
             event_metadata,
             snapshot_id,
             inserted,
             total_available,
+            snapshot_aggregate_persisted,
         )
 
         print("")
         print(f"Created snapshot {snapshot_id}")
         print(f"Inserted {inserted} sector records")
         print(f"Total available seats: {total_available}")
+        print(f"Snapshot aggregate persisted: {snapshot_aggregate_persisted}")
         print(f"Collector result: {result_path}")
         print("")
         print("SUCCESS")
